@@ -579,9 +579,9 @@ class DemoLauncher(App):
                     self._log("server", f"[bold green]> {cmd_text}[/]")
             event.input.value = ""
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "build-button":
-            self._start_build()
+            await self._start_build()
         elif event.button.id == "launch-btn":
             self.action_launch_instance()
         elif event.button.id == "stop-all-btn":
@@ -589,35 +589,41 @@ class DemoLauncher(App):
 
     # -- Build phase --------------------------------------------------------
 
-    def _start_build(self):
+    async def _start_build(self):
         self.phase = "building"
         setup = self.query_one("#setup-screen")
-        setup.remove()
-        self._mount_main_screen()
+        await setup.remove()
+        await self._mount_main_screen()
         self._run_build()
 
-    def _mount_main_screen(self):
+    async def _mount_main_screen(self):
+        # Textual mounts asynchronously; await each mount so TabbedContent's
+        # internal widgets exist before add_pane(), and logs exist before building.
         main = Vertical(id="main-screen")
-        self.mount(main, before=self.query_one(Footer))
+        await self.mount(main, before=self.query_one(Footer))
 
         bar = Horizontal(id="button-bar")
-        main.mount(bar)
-        bar.mount(Button("Launch Instance", id="launch-btn", variant="success", disabled=True))
-        bar.mount(Button("Stop All & Quit", id="stop-all-btn", variant="error"))
+        await main.mount(bar)
+        await bar.mount(
+            Button("Launch Instance", id="launch-btn", variant="success", disabled=True),
+            Button("Stop All & Quit", id="stop-all-btn", variant="error"),
+        )
 
         tabs = TabbedContent(id="tabs")
-        main.mount(tabs)
+        await main.mount(tabs)
 
         status_bar = Horizontal(id="status-bar")
-        main.mount(status_bar)
-        status_bar.mount(Static("⏳ Building...", id="status-text"))
-        status_bar.mount(Static("CPU: ---%", id="cpu-display"))
+        await main.mount(status_bar)
+        await status_bar.mount(
+            Static("⏳ Building...", id="status-text"),
+            Static("CPU: ---%", id="cpu-display"),
+        )
 
         # Add the build log tab
         build_pane = TabPane("Build", id="tab-build")
-        tabs.add_pane(build_pane)
+        await tabs.add_pane(build_pane)
         build_log = RichLog(id="log-build", highlight=True, markup=True, wrap=True, min_width=0)
-        build_pane.mount(build_log)
+        await build_pane.mount(build_log)
 
         # Start CPU monitor
         self._start_cpu_monitor()
