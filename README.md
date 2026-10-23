@@ -172,13 +172,14 @@ Once the prerequisites above are installed, run the launcher from the
 repository root:
 
 ```bash
-python3 demos/tauri/demo_launcher.py
+uv run demos/tauri/demo_launcher.py
 ```
 
 The launcher builds everything, starts the backend and the Next.js dev server,
-and provides a TUI for spawning additional client instances. It bootstraps its
-own Python virtual environment (installing
-[Textual](https://github.com/Textualize/textual) for the TUI); the remaining
+and provides a TUI for spawning additional client instances.
+[uv](https://docs.astral.sh/uv/getting-started/installation/) manages Python
+and installs [Textual](https://github.com/Textualize/textual) for the TUI
+using the launcher's inline dependency metadata; the remaining
 prerequisites — Node.js and, on Linux, the WebKit/GTK libraries — must already
 be installed. If RISC Zero is not detected, the launcher automatically builds
 and runs without succinct fast-forward proofs.

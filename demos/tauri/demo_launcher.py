@@ -1,65 +1,25 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["textual==8.2.8"]
+# ///
 """Encrypted Spaces Demo Launcher — single-file TUI for building and running the Tauri demo."""
 
 import os, sys, subprocess, asyncio, signal, shutil, time, re
 from pathlib import Path
 
+from textual.app import App, ComposeResult
+from textual.containers import Horizontal, Vertical, Container
+from textual.binding import Binding
+from textual.widgets import (
+    Header, Footer, Static, Button, RichLog, TabbedContent, TabPane,
+    Switch, Label, Rule, LoadingIndicator, Select, Input,
+)
+from textual.css.query import NoMatches
+from textual import work
+
 # Regex to strip ANSI escape sequences from subprocess output
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
-
-# --- Venv bootstrap: ensure we're running inside our local venv with textual ---
-VENV_DIR = Path(__file__).resolve().parent / ".launcher-venv"
-
-def _in_venv() -> bool:
-    return sys.prefix != sys.base_prefix
-
-def _bootstrap_venv():
-    """Create a local venv, install textual, and re-exec this script inside it."""
-    venv_python = VENV_DIR / "bin" / "python3"
-
-    if VENV_DIR.exists() and venv_python.exists():
-        # Venv exists but we're not in it — re-exec
-        os.execv(str(venv_python), [str(venv_python), __file__] + sys.argv[1:])
-
-    print("The 'textual' package is required but not installed.")
-    print(f"A local venv will be created at: {VENV_DIR}\n")
-    resp = input("Create venv and install textual? [Y/n] ").strip().lower()
-    if resp == "n":
-        print("\nYou can set it up manually:")
-        print(f"  python3 -m venv {VENV_DIR}")
-        print(f"  {venv_python} -m pip install textual")
-        print(f"  Then re-run: {venv_python} {__file__}")
-        sys.exit(1)
-
-    print("\nCreating venv...")
-    subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)])
-    print("Installing textual...")
-    subprocess.check_call([str(venv_python), "-m", "pip", "install", "-q", "textual"])
-    print("Done! Launching...\n")
-    os.execv(str(venv_python), [str(venv_python), __file__] + sys.argv[1:])
-
-try:
-    from textual.app import App, ComposeResult
-    from textual.containers import Horizontal, Vertical, Container
-    from textual.binding import Binding
-    from textual.widgets import (
-        Header, Footer, Static, Button, RichLog, TabbedContent, TabPane,
-        Switch, Label, Rule, LoadingIndicator, Select, Input,
-    )
-    from textual.css.query import NoMatches
-    from textual import work
-except ImportError:
-    if _in_venv():
-        print("Installing textual into existing venv...")
-        try:
-            subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except subprocess.CalledProcessError:
-            pass
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "textual"])
-        os.execv(sys.executable, [sys.executable, __file__] + sys.argv[1:])
-    _bootstrap_venv()
-
 
 # ---------------------------------------------------------------------------
 # Paths — the script lives in demos/tauri/, workspace root is ../../

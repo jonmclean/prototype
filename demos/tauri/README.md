@@ -222,10 +222,13 @@ The backend Rust code (`src-tauri/src/`) follows standard Rust patterns and is t
 ## Demo Launcher
 There is a python script that builds everything, starts the backend and the Next.js server (required for Tauri) and has UI to launch new instances of the app.  From the repository root, run
 ```bash
-python3 demos/tauri/demo_launcher.py
+uv run demos/tauri/demo_launcher.py
 ```
-It should detect dependencies and provide instructions to install them. The primary ones are python, pip and venv; the script will install 
-the [Textual](https://github.com/Textualize/textual) python module, which provides the UI support.
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first.
+uv manages Python and installs [Textual](https://github.com/Textualize/textual),
+which provides the UI, using the script's inline dependency metadata. No manual
+venv or pip setup is needed. The launcher detects the remaining prerequisites
+and provides instructions to install them.
 
 ### Driving the backend inspector
 
@@ -247,7 +250,7 @@ To override the file path:
 
 ```bash
 export ENCRYPTED_SPACES_INSPECTOR_LOG=/tmp/inspector.ndjson
-python3 demo_launcher.py
+uv run demos/tauri/demo_launcher.py
 ```
 
 
@@ -276,6 +279,5 @@ npm --prefix demos/tauri run tauri dev
 cargo run -p encrypted-spaces-demo
 
 ```
-
 
 

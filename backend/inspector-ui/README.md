@@ -16,7 +16,7 @@ Three modes, depending on what you're trying to do:
 
 | Use case | How to run | Where to open |
 |---|---|---|
-| **Full demo + live inspector** — the normal "show me everything" path. Launcher builds the SPA, the backend, and a Tauri client, and wires them together. | `cd demos/tauri && python3 demo_launcher.py` | `http://localhost:8080/_inspect/` |
+| **Full demo + live inspector** — the normal "show me everything" path. Launcher builds the SPA, the backend, and a Tauri client, and wires them together. | `cd demos/tauri && uv run demo_launcher.py` | `http://localhost:8080/_inspect/` |
 | **Backend on its own** — useful for loading a previously captured `.ndjson`, driving the backend with the test harness or your own SDK code, or debugging the backend without the Tauri client. | `cargo run -p encrypted-spaces-backend-server` | `http://localhost:8080/_inspect/` |
 | **SPA dev loop** — editing the inspector UI itself. Vite hot-reloads on file save; the live WebSocket isn't available (Vite doesn't proxy to the backend), so you'll be loading captured `.ndjson` files. | `cd backend/inspector-ui && npm run dev` | `http://localhost:5174/_inspect/` |
 
