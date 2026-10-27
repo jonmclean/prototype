@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Encrypted Spaces Demo Launcher — single-file TUI for building and running the Tauri demo."""
 
-import os, sys, subprocess, asyncio, signal, shutil, time, re
+import os, sys, subprocess, asyncio, signal, shutil, time, re, codecs
 from pathlib import Path
 
 # Regex to strip ANSI escape sequences from subprocess output
@@ -48,6 +48,7 @@ try:
     )
     from textual.css.query import NoMatches
     from textual import work
+    from rich.text import Text
 except ImportError:
     if _in_venv():
         print("Installing textual into existing venv...")
@@ -381,25 +382,51 @@ class ProcessManager:
         log_fh = None
         try:
             LOGS_DIR.mkdir(exist_ok=True)
-            log_fh = open(log_path, "w")
+            log_fh = open(log_path, "w", encoding="utf-8")
         except OSError:
             pass
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                break
-            text = _ANSI_RE.sub("", line.decode("utf-8", errors="replace").rstrip("\n"))
-            self.app._log(log_tab, text)
+        # Oversized trace lines make readline() raise and abandon the pipe.
+        # Consume over-limit fragments instead so the child cannot block on logging.
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        ready_tail = ""
+        try:
+            while True:
+                eof = False
+                try:
+                    chunk = await proc.stdout.readuntil(b"\n")
+                except asyncio.LimitOverrunError as error:
+                    chunk = await proc.stdout.readexactly(error.consumed)
+                except asyncio.IncompleteReadError as error:
+                    chunk = error.partial
+                    eof = True
+
+                # A fragment can end inside a UTF-8 character, including at EOF.
+                text = _ANSI_RE.sub("", decoder.decode(chunk, final=eof))
+                if text:
+                    if log_fh:
+                        log_fh.write(text)
+                        log_fh.flush()
+                    # Preserve full payloads on disk, but bound UI rendering work.
+                    # Text also prevents payload brackets from becoming Rich markup.
+                    display = text.rstrip("\n")
+                    if len(display) > 4096:
+                        display = display[:4096] + " ... [display truncated; full output is in the log file]"
+                    self.app._log(log_tab, Text(display))
+                    if ready_event and ready_marker and not ready_event.is_set():
+                        # The readiness marker can straddle two long-line fragments.
+                        ready_text = ready_tail + text
+                        if ready_marker in ready_text:
+                            ready_event.set()
+                        ready_tail = ready_text[-(len(ready_marker) - 1):] if len(ready_marker) > 1 else ""
+                if eof:
+                    break
+            returncode = await proc.wait()
+            self.app._log(log_tab, f"\n[Process exited with code {returncode}]")
             if log_fh:
-                log_fh.write(text + "\n")
-                log_fh.flush()
-            if ready_event and ready_marker and ready_marker in text:
-                ready_event.set()
-        returncode = await proc.wait()
-        self.app._log(log_tab, f"\n[Process exited with code {returncode}]")
-        if log_fh:
-            log_fh.write(f"\n[Process exited with code {returncode}]\n")
-            log_fh.close()
+                log_fh.write(f"\n[Process exited with code {returncode}]\n")
+        finally:
+            if log_fh:
+                log_fh.close()
 
     async def stop(self, name: str):
         proc = self.processes.pop(name, None)
@@ -622,7 +649,7 @@ class DemoLauncher(App):
         # Start CPU monitor
         self._start_cpu_monitor()
 
-    def _log(self, tab_id: str, text: str):
+    def _log(self, tab_id: str, text: str | Text):
         """Write a line to a log tab. Safe to call from callbacks."""
         try:
             log_widget = self.query_one(f"#log-{tab_id}", RichLog)
