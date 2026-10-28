@@ -1,0 +1,9 @@
+table "entries" {
+    column "id" type="int" plaintext=#true
+    column "parent_id" type="int" plaintext=#true indexed=#true
+    column "name" type="text"
+    column "directory" type="int"
+    column "size" type="int"
+    column "modified" type="int"
+    column "content" type="fileref"
+}

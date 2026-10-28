@@ -6,6 +6,7 @@ members = [
     "backend/storage-encoding",
     "demos/tauri/src-tauri",
     "demos/tauri/test-harness",
+    "demos/nemo",
     "crypto",
     "ffproof/integration_tests",
     "ffproof",

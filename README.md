@@ -187,6 +187,10 @@ and runs without succinct fast-forward proofs.
 See [`demos/tauri/README.md`](demos/tauri/README.md) for prerequisites,
 manual run instructions, and architecture details.
 
+For a standalone filesystem mounted in Nemo through GVfs, see
+[`demos/nemo/README.md`](demos/nemo/README.md). It bridges the SDK to a local,
+authenticated WebDAV endpoint using GVfs's existing DAV backend.
+
 ## About
 
 Encrypted Spaces is a project of the Encrypted Spaces Foundation, a nonprofit corporation,

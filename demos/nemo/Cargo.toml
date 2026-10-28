@@ -1,0 +1,31 @@
+[package]
+name = "encrypted-spaces-nemo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+avl = ["encrypted-spaces-sdk/avl", "encrypted-spaces-sdk-codegen/avl"]
+
+[build-dependencies]
+encrypted-spaces-sdk-codegen.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+bytes = "1"
+clap.workspace = true
+dav-server = { version = "0.11", default-features = false }
+encrypted-spaces-sdk.workspace = true
+fs2 = "0.4"
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["fs", "net", "signal"] }
+uuid.workspace = true
+
+[dev-dependencies]
+encrypted-spaces-sdk = { workspace = true, features = ["local-transport", "testing"] }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
