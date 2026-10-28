@@ -12,7 +12,7 @@ use dav_server::{
 use encrypted_spaces_nemo::{
     filesystem::{EncryptedFs, MAX_FILE_SIZE},
     sdk_codegen, server,
-    session::{Profile, Session},
+    session::{Config, InviteBundle, Profile, Session},
 };
 use encrypted_spaces_sdk::{local_transport::LocalTransport, Space};
 use std::os::unix::fs::PermissionsExt;
@@ -358,4 +358,132 @@ fn profile_is_private_and_exclusive() {
     );
     drop(first);
     assert!(Profile::lock(path).is_ok());
+}
+
+#[tokio::test]
+async fn invite_join_shares_files_and_preserves_independent_profiles() {
+    let alice = Fixture::new().await;
+    assert_eq!(
+        alice
+            .request("PUT", "/before.txt", "before invite", &[])
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+    let snapshot_path = alice.dir.path().join("snapshot.json");
+    let snapshot = serde_json::from_slice(&std::fs::read(&snapshot_path).unwrap()).unwrap();
+    let session = Session {
+        space: Space::restore(alice.transport.clone(), snapshot)
+            .await
+            .unwrap(),
+        snapshot_path,
+    };
+    let invite_path = alice.dir.path().join("bob-invite.json");
+    session
+        .export_invite(&invite_path, "wss://example.test/ws".into())
+        .await
+        .unwrap();
+    let invite_bytes = std::fs::read(&invite_path).unwrap();
+    assert_eq!(
+        std::fs::metadata(&invite_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert!(session
+        .export_invite(&invite_path, "ws://different.test/ws".into())
+        .await
+        .is_err());
+    assert_eq!(std::fs::read(&invite_path).unwrap(), invite_bytes);
+
+    let bundle: InviteBundle = serde_json::from_slice(&invite_bytes).unwrap();
+    assert_eq!(bundle.server, "wss://example.test/ws");
+    let bob_space = Space::join(
+        alice.transport.clone(),
+        bundle.invite,
+        sdk_codegen::application_schema(),
+    )
+    .await
+    .unwrap();
+    let bob_dir = tempfile::tempdir().unwrap();
+    let profile = Profile::lock(bob_dir.path().join("profile")).unwrap();
+    profile.ensure_empty().unwrap();
+    profile
+        .initialize(bob_space, bundle.server, 9844)
+        .await
+        .unwrap();
+    assert!(profile.ensure_empty().is_err());
+    let config = Config::load(&profile.path).unwrap();
+    assert_eq!(config.port, 9844);
+    assert_eq!(config.server, "wss://example.test/ws");
+    assert!(!config.password.is_empty());
+    for name in ["snapshot.json", "connection.json"] {
+        assert_eq!(
+            std::fs::metadata(profile.path.join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    let snapshot_path = profile.path.join("snapshot.json");
+    let snapshot = serde_json::from_slice(&std::fs::read(&snapshot_path).unwrap()).unwrap();
+    let bob_session = Session {
+        space: Space::restore(alice.transport.clone(), snapshot)
+            .await
+            .unwrap(),
+        snapshot_path,
+    };
+    // A joined user can invite another member after restoring their own keys.
+    let charlie_invite = bob_dir.path().join("charlie-invite.json");
+    bob_session
+        .export_invite(&charlie_invite, config.server)
+        .await
+        .unwrap();
+    let bundle: InviteBundle =
+        serde_json::from_slice(&std::fs::read(charlie_invite).unwrap()).unwrap();
+    Space::join(
+        alice.transport.clone(),
+        bundle.invite,
+        sdk_codegen::application_schema(),
+    )
+    .await
+    .unwrap();
+    let bob_fs = EncryptedFs::new(bob_session);
+    let bob = Fixture {
+        dir: bob_dir,
+        transport: alice.transport.clone(),
+        router: server::router(bob_fs.clone(), "test-password"),
+        fs: bob_fs,
+    };
+    assert_eq!(
+        bob.request("GET", "/before.txt", "", &[]).await.2,
+        "before invite"
+    );
+    assert_eq!(
+        bob.request("PUT", "/bob.txt", "from Bob", &[]).await.0,
+        StatusCode::CREATED
+    );
+    // Restore Alice from the snapshot saved by export_invite, then see Bob's write.
+    let mut alice = alice;
+    alice.restore().await;
+    assert_eq!(
+        alice.request("GET", "/bob.txt", "", &[]).await.2,
+        "from Bob"
+    );
+    assert_eq!(
+        alice
+            .request("PUT", "/after.txt", "from Alice", &[])
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        bob.request("GET", "/after.txt", "", &[]).await.2,
+        "from Alice"
+    );
 }

@@ -155,7 +155,7 @@ impl EncryptedFs {
     }
 
     async fn entries(session: &Session) -> FsResult<Vec<Entry>> {
-        session.space.sync().await.map_err(failure)?;
+        session.sync().await.map_err(failure)?;
         session
             .space
             .table::<Entry>("entries")

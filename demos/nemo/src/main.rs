@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use encrypted_spaces_nemo::{
     filesystem::EncryptedFs,
     sdk_codegen, server,
-    session::{write_private_json, Config, Profile, Session},
+    session::{Config, InviteBundle, Profile, Session},
 };
 use encrypted_spaces_sdk::{Space, WebSocketTransport};
 use std::io::Write;
@@ -29,6 +29,22 @@ enum Operation {
         #[arg(long, default_value_t = 9843, value_parser = clap::value_parser!(u16).range(1..))]
         port: u16,
     },
+    /// Join an existing space using a private invite file. Run once per new profile.
+    Join {
+        #[arg(long)]
+        invite: PathBuf,
+        /// Override the backend URL included in the invite.
+        #[arg(long)]
+        server: Option<String>,
+        #[arg(long, default_value_t = 9843, value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
+    },
+    /// Invite a new member. Stop this profile's bridge first; share the file securely.
+    Invite {
+        /// New private file to create; existing files are never overwritten.
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Run the loopback-only WebDAV bridge. Keep running while mounted.
     Serve,
     /// Mount with GVfs; appears in Nemo's sidebar. Requires a desktop session.
@@ -48,6 +64,20 @@ fn default_profile() -> Result<PathBuf> {
     Ok(state.join("encrypted-spaces/nemo"))
 }
 
+async fn restore_session(profile: &Profile, config: &Config) -> Result<Session> {
+    let snapshot_path = profile.path.join("snapshot.json");
+    let snapshot = serde_json::from_slice(&std::fs::read(&snapshot_path)?)?;
+    let transport = WebSocketTransport::new(&config.server).await?;
+    let space = Space::restore(transport, snapshot).await?;
+    let session = Session {
+        space,
+        snapshot_path,
+    };
+    session.sync().await?;
+    session.save().await?;
+    Ok(session)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -58,41 +88,43 @@ async fn main() -> Result<()> {
     match args.command {
         Operation::Init { server, port } => {
             let profile = Profile::lock(path)?;
-            if profile.path.join("snapshot.json").exists()
-                || profile.path.join("connection.json").exists()
-            {
-                bail!("profile already exists; use serve or choose another --profile");
-            }
+            profile.ensure_empty()?;
             let transport = WebSocketTransport::new(&server).await?;
             let space = Space::create(transport, sdk_codegen::application_schema()).await?;
-            let session = Session {
-                space,
-                snapshot_path: profile.path.join("snapshot.json"),
-            };
-            session.save().await?;
-            write_private_json(
-                &profile.path.join("connection.json"),
-                &Config {
-                    server,
-                    port,
-                    password: uuid::Uuid::new_v4().to_string(),
-                },
-            )?;
+            profile.initialize(space, server, port).await?;
             println!("Created encrypted file space. Run serve, then mount in another terminal.");
+        }
+        Operation::Join {
+            invite,
+            server,
+            port,
+        } => {
+            let profile = Profile::lock(path)?;
+            profile.ensure_empty()?;
+            let bundle: InviteBundle =
+                serde_json::from_slice(&std::fs::read(invite).context("cannot read invite file")?)
+                    .context("invalid Nemo invite file")?;
+            let server = server.unwrap_or(bundle.server);
+            let transport = WebSocketTransport::new(&server).await?;
+            let space =
+                Space::join(transport, bundle.invite, sdk_codegen::application_schema()).await?;
+            profile.initialize(space, server, port).await?;
+            println!("Joined encrypted file space. Run serve, then mount in another terminal.");
+        }
+        Operation::Invite { output } => {
+            let profile = Profile::lock(path)?;
+            let config = Config::load(&profile.path).context("run init or join first")?;
+            let session = restore_session(&profile, &config).await?;
+            session.export_invite(&output, config.server).await?;
+            println!(
+                "Invite saved to {}. Share it securely with one new user; it contains secret keys.",
+                output.display()
+            );
         }
         Operation::Serve => {
             let profile = Profile::lock(path)?;
-            let config = Config::load(&profile.path).context("run init first")?;
-            let snapshot_path = profile.path.join("snapshot.json");
-            let snapshot = serde_json::from_slice(&std::fs::read(&snapshot_path)?)?;
-            let transport = WebSocketTransport::new(&config.server).await?;
-            let space = Space::restore(transport, snapshot).await?;
-            space.sync().await?;
-            let session = Session {
-                space,
-                snapshot_path,
-            };
-            session.save().await?;
+            let config = Config::load(&profile.path).context("run init or join first")?;
+            let session = restore_session(&profile, &config).await?;
             let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.port)).await?;
             println!("Encrypted Spaces bridge ready: {}", config.dav_uri());
             axum::serve(
@@ -104,7 +136,7 @@ async fn main() -> Result<()> {
             drop(profile);
         }
         Operation::Mount => {
-            let config = Config::load(&path).context("run init first")?;
+            let config = Config::load(&path).context("run init or join first")?;
             let mut child = Command::new("gio")
                 .args(["mount", &config.dav_uri()])
                 .stdin(Stdio::piped())
@@ -148,5 +180,47 @@ async fn shutdown() {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},
         _ = terminate.recv() => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invite_and_join_arguments() {
+        let args = Args::try_parse_from([
+            "nemo",
+            "--profile",
+            "/tmp/bob",
+            "join",
+            "--invite",
+            "bob.json",
+            "--server",
+            "wss://example.test/ws",
+            "--port",
+            "9844",
+        ])
+        .unwrap();
+        assert_eq!(args.profile, Some(PathBuf::from("/tmp/bob")));
+        match args.command {
+            Operation::Join {
+                invite,
+                server,
+                port,
+            } => {
+                assert_eq!(invite, PathBuf::from("bob.json"));
+                assert_eq!(server.as_deref(), Some("wss://example.test/ws"));
+                assert_eq!(port, 9844);
+            }
+            _ => panic!("expected join"),
+        }
+        assert!(Args::try_parse_from(["nemo", "invite", "--output", "bob.json"]).is_ok());
+        assert!(Args::try_parse_from(["nemo", "join", "--invite", "bob.json"]).is_ok());
+        assert!(Args::try_parse_from(["nemo", "join"]).is_err());
+        assert!(Args::try_parse_from(["nemo", "invite"]).is_err());
+        assert!(
+            Args::try_parse_from(["nemo", "join", "--invite", "bob.json", "--port", "0",]).is_err()
+        );
     }
 }

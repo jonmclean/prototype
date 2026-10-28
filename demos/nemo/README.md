@@ -76,13 +76,57 @@ work.
 
 `--profile PATH` selects a different client profile for any command. The default
 is `$XDG_STATE_HOME/encrypted-spaces/nemo`, falling back to
-`$HOME/.local/state/encrypted-spaces/nemo`. `init --port PORT` changes the bridge's
-port (default 9843). Each independently created space needs its own profile and
-port. Build both client and backend with `--features avl` if using AVL storage.
+`$HOME/.local/state/encrypted-spaces/nemo`. `init --port PORT` or `join --port PORT`
+changes the bridge's port (default 9843). Each user/space needs its own profile,
+and bridges running on the same machine need different ports.
+Build both client and backend with `--features avl` if using AVL storage.
 `RISC0_SKIP_BUILD=1` is for the repository's development proof mode. Set it
 when running the backend as well as building: without it, the backend attempts
 to generate a fast-forward proof after its first batch of writes, which requires
 the skipped RISC Zero guest build.
+
+## Existing servers and inviting users
+
+To create a **new space on an existing server**, use
+`init --server wss://your-server.example/ws`. The server must support the Nemo
+schema (`demos/nemo/app_schema.kdl`); this does not connect to a Tauri space.
+Use `wss://` with a system-trusted certificate for remote connections.
+To reopen your own existing space, preserve its profile and run `serve`, not
+`init`. A server URL alone does not grant access to someone else's space.
+
+To invite another user to your current space, first unmount and stop `serve`
+(Ctrl+C in its terminal), leaving the backend running. Then:
+
+```sh
+target/debug/encrypted-spaces-nemo invite --output ./bob-invite.json
+target/debug/encrypted-spaces-nemo serve
+```
+
+Send `bob-invite.json` securely to the new user. It includes the backend URL and
+**secret provisional membership keys**; anyone holding it can attempt to join.
+The file is created with mode 0600 and must not already exist. Generate a
+separate invite for each user; do not share your own profile or snapshot.
+
+On the new user's machine:
+
+```sh
+target/debug/encrypted-spaces-nemo join --invite ./bob-invite.json
+target/debug/encrypted-spaces-nemo serve
+# In another terminal:
+target/debug/encrypted-spaces-nemo mount
+```
+
+`join` creates a new local profile, rotates the invited member's provisional
+keys, and generates a separate local WebDAV password. It refuses to overwrite an
+existing profile. `join --server wss://your-server.example/ws` overrides the URL
+in the invite, for example when the inviter used a loopback address. Only accept
+invites from trusted people and check the server URL before joining. Remove the
+invite file after a successful join.
+
+For two users on the same machine, add `--profile /path/to/bob-profile` to each
+of Bob's commands and `--port 9844` to his `join` command. Refresh Nemo to see
+other members' changes. Coordinate writes: inviting/joining enables membership
+and shared access, but does not add cross-client namespace locking (see below).
 
 ## Storage and behavior
 
@@ -106,7 +150,7 @@ the skipped RISC Zero guest build.
 ## Prototype limitations
 
 There is no custom `encrypted-spaces://` URI scheme, automatic startup,
-invite/join UI, offline mode, symlinks, Unix permission model, trash, or remote
+graphical invite/join UI, offline mode, symlinks, Unix permission model, trash, or remote
 change notifications. Refresh Nemo to see changes. The implementation is intended
 for one standalone writer, not concurrently mounted clients sharing a space:
 namespace uniqueness is checked client-side, not enforced across clients.
@@ -129,4 +173,6 @@ The integration suite exercises authenticated WebDAV against an in-process
 encrypted-spaces backend, including persistence/restoration, Unicode names,
 range reads, conditional overwrites, directory moves/copies/deletes, interrupted
 transfers, concurrent upload conflicts, protected root operations and profile
-locking. A desktop installation is still needed to exercise Nemo itself.
+locking, plus private invite export, joined-user restoration, onward invitations,
+and file access by different members. A desktop installation is still needed to
+exercise Nemo itself.
