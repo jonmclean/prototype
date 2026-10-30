@@ -47,7 +47,7 @@ target/debug/encrypted-spaces-nemo serve
 ```
 
 `serve` starts the local WebDAV server, mounts it with GVfs, and waits for an
-`exit` command in the same terminal. `mount` is an alias for this combined command.
+`exit` command in the same terminal.
 
 Select the new WebDAV mount in Nemo's sidebar. You can also open it directly:
 
@@ -90,8 +90,20 @@ Use `wss://` with a system-trusted certificate for remote connections.
 To reopen your own existing space, preserve its profile and run `serve`, not
 `init`. A server URL alone does not grant access to someone else's space.
 
-To invite another user to your current space, first exit `serve`
-(type `exit` or press Ctrl+C in its terminal), leaving the backend running. Then:
+To invite another user while mounted, enter this command in the running `serve`
+terminal (not a separate shell):
+
+```text
+invite --output ./bob-invite.json
+```
+
+The bridge stays mounted and uses its existing SDK session to create the invite
+and save updated state. Paths containing spaces can be quoted, for example
+`invite --output "./Bob invites/invite.json"`. Command and invitation errors are
+reported without ending the terminal session; type `exit` to unmount and stop.
+
+Alternatively, when `serve` is stopped, use the standalone command, leaving the
+backend running:
 
 ```sh
 target/debug/encrypted-spaces-nemo invite --output ./bob-invite.json
@@ -170,4 +182,6 @@ transfers, concurrent upload conflicts, protected root operations and profile
 locking, plus private invite export, joined-user restoration, onward invitations,
 and file access by different members. CLI tests use a fake GIO executable to check
 mount/unmount ordering and cleanup after exit, interruption, errors and panics.
+Terminal tests also create invitations through the live filesystem session and
+check joined-user access, quoted paths, command errors and invitation failures.
 A desktop installation is still needed to exercise Nemo itself.

@@ -2577,6 +2577,7 @@ dependencies = [
  "futures-util",
  "serde",
  "serde_json",
+ "shlex 2.0.1",
  "tempfile",
  "tokio",
  "tower",

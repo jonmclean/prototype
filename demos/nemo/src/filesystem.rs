@@ -8,6 +8,7 @@ use encrypted_spaces_sdk::File;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
@@ -152,6 +153,10 @@ impl EncryptedFs {
         Self {
             session: Arc::new(Mutex::new(session)),
         }
+    }
+
+    pub async fn export_invite(&self, path: &Path, server: String) -> anyhow::Result<()> {
+        self.session.lock().await.export_invite(path, server).await
     }
 
     async fn entries(session: &Session) -> FsResult<Vec<Entry>> {

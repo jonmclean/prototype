@@ -15,7 +15,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 #[derive(Parser)]
@@ -54,10 +54,34 @@ enum Operation {
         output: PathBuf,
     },
     /// Start the bridge and mount in Nemo; type exit to unmount and stop.
-    #[command(alias = "mount")]
     Serve,
     /// Print the GVfs URI (no password).
     Uri,
+}
+
+#[derive(Parser)]
+#[command(no_binary_name = true, about = "Commands for the mounted Nemo session")]
+struct TerminalArgs {
+    #[command(subcommand)]
+    command: TerminalCommand,
+}
+
+#[derive(Subcommand)]
+enum TerminalCommand {
+    /// Create a private invitation without unmounting.
+    Invite {
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Unmount and stop the bridge.
+    Exit,
+}
+
+fn print_invite(output: &Path) {
+    println!(
+        "Invite saved to {}. Share it securely with one new user; it contains secret keys.",
+        output.display()
+    );
 }
 
 fn default_profile() -> Result<PathBuf> {
@@ -121,10 +145,7 @@ async fn main() -> Result<()> {
             let config = Config::load(&profile.path).context("run init or join first")?;
             let session = restore_session(&profile, &config).await?;
             session.export_invite(&output, config.server).await?;
-            println!(
-                "Invite saved to {}. Share it securely with one new user; it contains secret keys.",
-                output.display()
-            );
+            print_invite(&output);
         }
         Operation::Serve => {
             let profile = Profile::lock(path)?;
@@ -134,7 +155,8 @@ async fn main() -> Result<()> {
             let interrupted = shutdown()?;
             println!("Encrypted Spaces bridge ready: {}", config.dav_uri());
             let (stop, stopped) = oneshot::channel();
-            let router = server::router(EncryptedFs::new(session), &config.password);
+            let filesystem = EncryptedFs::new(session);
+            let router = server::router(filesystem.clone(), &config.password);
             let bridge = tokio::spawn(async move {
                 axum::serve(listener, router)
                     .with_graceful_shutdown(async {
@@ -147,7 +169,7 @@ async fn main() -> Result<()> {
                 stop,
                 &config,
                 Path::new("gio"),
-                exit_command(),
+                terminal_session(&filesystem, &config.server),
                 interrupted,
             )
             .await?;
@@ -186,6 +208,7 @@ async fn mount(config: &Config, gio: &Path) -> Result<()> {
     }
     println!("Mounted in Nemo's sidebar: {}", config.dav_uri());
     println!("Type exit to unmount and stop the bridge (or press Ctrl+C).");
+    println!("Type invite --output PATH to create an invitation without unmounting.");
     Ok(())
 }
 
@@ -276,28 +299,56 @@ async fn mounted_session(
     result
 }
 
-fn wait_for_exit(input: impl BufRead) -> Result<()> {
+fn read_commands(input: impl BufRead, send: mpsc::Sender<Result<String>>) {
     for line in input.lines() {
-        let line = line.context("cannot read exit command")?;
-        if line.trim() == "exit" {
-            return Ok(());
+        let line = line.context("cannot read terminal command");
+        let done = line.as_ref().map_or(true, |line| line.trim() == "exit");
+        if send.blocking_send(line).is_err() || done {
+            break;
         }
-        eprintln!("Unknown command. Type exit to unmount and stop.");
+    }
+}
+
+async fn terminal_session(filesystem: &EncryptedFs, server: &str) -> Result<()> {
+    let (send, received) = mpsc::channel(16);
+    // Tokio stdin can block runtime shutdown after a signal while awaiting a line.
+    std::thread::Builder::new()
+        .name("nemo-terminal-commands".into())
+        .spawn(move || {
+            read_commands(std::io::stdin().lock(), send);
+        })
+        .context("cannot start terminal command reader")?;
+    run_commands(received, filesystem, server).await
+}
+
+fn parse_terminal_command(line: &str) -> Result<TerminalCommand> {
+    let words = shlex::split(line).context("invalid command: unmatched quotes or invalid input")?;
+    Ok(TerminalArgs::try_parse_from(words)?.command)
+}
+
+async fn run_commands(
+    mut received: mpsc::Receiver<Result<String>>,
+    filesystem: &EncryptedFs,
+    server: &str,
+) -> Result<()> {
+    while let Some(line) = received.recv().await {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match parse_terminal_command(&line) {
+            Ok(TerminalCommand::Exit) => return Ok(()),
+            Ok(TerminalCommand::Invite { output }) => {
+                match filesystem.export_invite(&output, server.to_owned()).await {
+                    Ok(()) => print_invite(&output),
+                    Err(error) => eprintln!("Cannot create invitation: {error:#}"),
+                }
+            }
+            Err(error) => eprintln!("{error}"),
+        }
     }
     // A closed terminal must not leave the filesystem mounted.
     Ok(())
-}
-
-async fn exit_command() -> Result<()> {
-    let (send, received) = oneshot::channel();
-    // Tokio stdin can block runtime shutdown after a signal while awaiting a line.
-    std::thread::Builder::new()
-        .name("nemo-exit-command".into())
-        .spawn(move || {
-            let _ = send.send(wait_for_exit(std::io::stdin().lock()));
-        })
-        .context("cannot start exit command reader")?;
-    received.await.context("exit command reader stopped")?
 }
 
 fn shutdown() -> Result<impl Future<Output = Result<()>>> {
@@ -392,25 +443,150 @@ mod tests {
 
     #[test]
     fn combined_command_arguments() {
-        for command in ["serve", "mount"] {
-            assert!(matches!(
-                Args::try_parse_from(["nemo", command]).unwrap().command,
-                Operation::Serve
-            ));
-        }
+        assert!(matches!(
+            Args::try_parse_from(["nemo", "serve"]).unwrap().command,
+            Operation::Serve
+        ));
+        assert!(Args::try_parse_from(["nemo", "mount"]).is_err());
         assert!(Args::try_parse_from(["nemo", "unmount"]).is_err());
     }
 
     #[test]
     fn exit_commands_and_closed_or_invalid_input() {
         let mut input = std::io::Cursor::new(b"help\n exit \nstill here\n");
-        wait_for_exit(&mut input).unwrap();
+        let (send, mut received) = mpsc::channel(16);
+        read_commands(&mut input, send);
+        assert_eq!(received.try_recv().unwrap().unwrap(), "help");
+        assert_eq!(received.try_recv().unwrap().unwrap(), " exit ");
         assert_eq!(
             &input.get_ref()[input.position() as usize..],
             b"still here\n"
         );
-        wait_for_exit(&b""[..]).unwrap();
-        assert!(wait_for_exit(&b"\xff\n"[..]).is_err());
+        assert!(received.try_recv().is_err());
+        let (send, mut received) = mpsc::channel(16);
+        read_commands(&b""[..], send);
+        assert!(received.try_recv().is_err());
+        let (send, mut received) = mpsc::channel(16);
+        read_commands(&b"\xff\n"[..], send);
+        assert!(received.try_recv().unwrap().is_err());
+    }
+
+    #[test]
+    fn terminal_command_arguments() {
+        match parse_terminal_command("invite --output 'Bob invites/invite.json'").unwrap() {
+            TerminalCommand::Invite { output } => {
+                assert_eq!(output, PathBuf::from("Bob invites/invite.json"));
+            }
+            _ => panic!("expected invite"),
+        }
+        assert!(matches!(
+            parse_terminal_command(" exit ").unwrap(),
+            TerminalCommand::Exit
+        ));
+        for invalid in ["invite", "mount", "exit extra", "invite --output 'unclosed"] {
+            assert!(parse_terminal_command(invalid).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_invites_share_the_live_filesystem_session() {
+        use dav_server::{davpath::DavPath, fs::DavFileSystem};
+        use encrypted_spaces_sdk::local_transport::LocalTransport;
+
+        let directory = tempfile::tempdir().unwrap();
+        let transport = LocalTransport::from_schema_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/app_schema.kdl"
+        ))
+        .await
+        .unwrap();
+        let space = Space::create(transport.clone(), sdk_codegen::application_schema())
+            .await
+            .unwrap();
+        let snapshot_path = directory.path().join("snapshot.json");
+        let filesystem = EncryptedFs::new(Session {
+            space,
+            snapshot_path: snapshot_path.clone(),
+        });
+        filesystem
+            .create_dir(&DavPath::new("/before-invite").unwrap())
+            .await
+            .unwrap();
+        let invite_path = directory.path().join("Bob invite.json");
+        let second_path = directory.path().join("second.json");
+        let (send, received) = mpsc::channel(16);
+        for line in [
+            "unknown".to_owned(),
+            "invite".to_owned(),
+            format!("invite --output '{}'", invite_path.display()),
+            format!("invite --output '{}'", invite_path.display()),
+            format!("invite --output '{}'", second_path.display()),
+            "exit".to_owned(),
+            format!(
+                "invite --output '{}'",
+                directory.path().join("after-exit").display()
+            ),
+        ] {
+            send.send(Ok(line)).await.unwrap();
+        }
+        drop(send);
+        run_commands(received, &filesystem, "ws://example.test/ws")
+            .await
+            .unwrap();
+        assert!(second_path.exists());
+        assert!(!directory.path().join("after-exit").exists());
+        let bundle: InviteBundle =
+            serde_json::from_slice(&std::fs::read(&invite_path).unwrap()).unwrap();
+        assert_eq!(bundle.server, "ws://example.test/ws");
+        assert_eq!(
+            std::fs::metadata(&invite_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let joined = Space::join(
+            transport.clone(),
+            bundle.invite,
+            sdk_codegen::application_schema(),
+        )
+        .await
+        .unwrap();
+        let joined_fs = EncryptedFs::new(Session {
+            space: joined,
+            snapshot_path: directory.path().join("joined.json"),
+        });
+        assert!(joined_fs
+            .metadata(&DavPath::new("/before-invite").unwrap())
+            .await
+            .is_ok());
+        filesystem
+            .create_dir(&DavPath::new("/after-invite").unwrap())
+            .await
+            .unwrap();
+        assert!(joined_fs
+            .metadata(&DavPath::new("/after-invite").unwrap())
+            .await
+            .is_ok());
+        let snapshot = serde_json::from_slice(&std::fs::read(snapshot_path).unwrap()).unwrap();
+        Space::restore(transport, snapshot).await.unwrap();
+
+        let (send, received) = mpsc::channel(1);
+        drop(send);
+        run_commands(received, &filesystem, "ws://example.test/ws")
+            .await
+            .unwrap();
+        let (send, received) = mpsc::channel(1);
+        send.send(Err(anyhow::anyhow!("terminal read failed")))
+            .await
+            .unwrap();
+        drop(send);
+        assert!(run_commands(received, &filesystem, "ws://example.test/ws")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("terminal read failed"));
     }
 
     #[tokio::test]
@@ -431,7 +607,7 @@ mod tests {
                 let mut response = String::new();
                 stream.read_to_string(&mut response).await?;
                 assert!(response.starts_with("HTTP/1.1 404"));
-                wait_for_exit(&b"exit\n"[..])
+                Ok(())
             },
             std::future::pending(),
         )
@@ -526,7 +702,7 @@ mod tests {
                         mounted.send(()).unwrap();
                         std::future::pending().await
                     } else {
-                        wait_for_exit(&b"\xff\n"[..])
+                        Err(anyhow::anyhow!("cannot read terminal command"))
                     }
                 },
                 async move {
@@ -538,7 +714,10 @@ mod tests {
             if interrupted {
                 result.unwrap();
             } else {
-                assert!(result.unwrap_err().to_string().contains("cannot read exit"));
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cannot read terminal"));
             }
             assert!(gio.calls().ends_with(&format!(
                 "mount --unmount {}\nbridge stopped\n",

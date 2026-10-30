@@ -22,6 +22,7 @@ fs2 = "0.4"
 futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+shlex = "2"
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "signal"] }
 uuid.workspace = true
 
