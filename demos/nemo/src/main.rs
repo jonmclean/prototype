@@ -6,9 +6,17 @@ use encrypted_spaces_nemo::{
     session::{Config, InviteBundle, Profile, Session},
 };
 use encrypted_spaces_sdk::{Space, WebSocketTransport};
-use std::io::Write;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use futures_util::FutureExt;
+use std::future::Future;
+use std::io::BufRead;
+use std::panic::AssertUnwindSafe;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
+use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 #[derive(Parser)]
 #[command(about = "Mount encrypted-spaces in Nemo using GVfs WebDAV")]
@@ -45,12 +53,9 @@ enum Operation {
         #[arg(long)]
         output: PathBuf,
     },
-    /// Run the loopback-only WebDAV bridge. Keep running while mounted.
+    /// Start the bridge and mount in Nemo; type exit to unmount and stop.
+    #[command(alias = "mount")]
     Serve,
-    /// Mount with GVfs; appears in Nemo's sidebar. Requires a desktop session.
-    Mount,
-    /// Unmount the GVfs filesystem.
-    Unmount,
     /// Print the GVfs URI (no password).
     Uri,
 }
@@ -92,7 +97,7 @@ async fn main() -> Result<()> {
             let transport = WebSocketTransport::new(&server).await?;
             let space = Space::create(transport, sdk_codegen::application_schema()).await?;
             profile.initialize(space, server, port).await?;
-            println!("Created encrypted file space. Run serve, then mount in another terminal.");
+            println!("Created encrypted file space. Run serve to mount it in Nemo.");
         }
         Operation::Join {
             invite,
@@ -109,7 +114,7 @@ async fn main() -> Result<()> {
             let space =
                 Space::join(transport, bundle.invite, sdk_codegen::application_schema()).await?;
             profile.initialize(space, server, port).await?;
-            println!("Joined encrypted file space. Run serve, then mount in another terminal.");
+            println!("Joined encrypted file space. Run serve to mount it in Nemo.");
         }
         Operation::Invite { output } => {
             let profile = Profile::lock(path)?;
@@ -126,66 +131,462 @@ async fn main() -> Result<()> {
             let config = Config::load(&profile.path).context("run init or join first")?;
             let session = restore_session(&profile, &config).await?;
             let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.port)).await?;
+            let interrupted = shutdown()?;
             println!("Encrypted Spaces bridge ready: {}", config.dav_uri());
-            axum::serve(
-                listener,
-                server::router(EncryptedFs::new(session), &config.password),
+            let (stop, stopped) = oneshot::channel();
+            let router = server::router(EncryptedFs::new(session), &config.password);
+            let bridge = tokio::spawn(async move {
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(async {
+                        let _ = stopped.await;
+                    })
+                    .await
+            });
+            mounted_session(
+                bridge,
+                stop,
+                &config,
+                Path::new("gio"),
+                exit_command(),
+                interrupted,
             )
-            .with_graceful_shutdown(shutdown())
             .await?;
             drop(profile);
-        }
-        Operation::Mount => {
-            let config = Config::load(&path).context("run init or join first")?;
-            let mut child = Command::new("gio")
-                .args(["mount", &config.dav_uri()])
-                .stdin(Stdio::piped())
-                .spawn()
-                .context("gio is required; install libglib2.0-bin and gvfs-backends")?;
-            let mut stdin = child.stdin.take().context("gio stdin unavailable")?;
-            // Supply credentials through a pipe, never process arguments or the URI.
-            stdin.write_all(format!("{}\n", config.password).as_bytes())?;
-            drop(stdin);
-            if !child.wait()?.success() {
-                bail!("GVfs mount failed; ensure serve is running in this desktop session");
-            }
-            if !Command::new("gio")
-                .args(["info", &config.dav_uri()])
-                .stdout(Stdio::null())
-                .status()?
-                .success()
-            {
-                bail!("GVfs mounted but the filesystem is not accessible");
-            }
-            println!("Mounted in Nemo's sidebar: {}", config.dav_uri());
-        }
-        Operation::Unmount => {
-            let config = Config::load(&path)?;
-            if !Command::new("gio")
-                .args(["mount", "--unmount", &config.dav_uri()])
-                .status()?
-                .success()
-            {
-                bail!("GVfs unmount failed");
-            }
         }
         Operation::Uri => println!("{}", Config::load(&path)?.dav_uri()),
     }
     Ok(())
 }
 
-async fn shutdown() {
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("install SIGTERM handler");
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {},
-        _ = terminate.recv() => {},
+async fn mount(config: &Config, gio: &Path) -> Result<()> {
+    let mut child = Command::new(gio)
+        .args(["mount", &config.dav_uri()])
+        .stdin(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("gio is required; install libglib2.0-bin and gvfs-backends")?;
+    let mut stdin = child.stdin.take().context("gio stdin unavailable")?;
+    // Supply credentials through a pipe, never process arguments or the URI.
+    stdin
+        .write_all(format!("{}\n", config.password).as_bytes())
+        .await?;
+    drop(stdin);
+    if !child.wait().await?.success() {
+        bail!("GVfs mount failed; ensure GVfs is available in this desktop session");
     }
+    if !Command::new(gio)
+        .args(["info", &config.dav_uri()])
+        .stdout(Stdio::null())
+        .kill_on_drop(true)
+        .status()
+        .await?
+        .success()
+    {
+        bail!("GVfs mounted but the filesystem is not accessible");
+    }
+    println!("Mounted in Nemo's sidebar: {}", config.dav_uri());
+    println!("Type exit to unmount and stop the bridge (or press Ctrl+C).");
+    Ok(())
+}
+
+async fn unmount(config: &Config, gio: &Path) -> Result<()> {
+    if !Command::new(gio)
+        .args(["mount", "--unmount", &config.dav_uri()])
+        .status()
+        .await
+        .context("cannot run gio to unmount the filesystem")?
+        .success()
+    {
+        bail!("GVfs unmount failed");
+    }
+    Ok(())
+}
+
+fn bridge_result(result: Result<std::io::Result<()>, tokio::task::JoinError>) -> Result<()> {
+    result
+        .context("WebDAV bridge task failed")?
+        .context("WebDAV bridge failed")
+}
+
+fn cleanup_result(result: Result<()>, cleanup: Result<()>) -> Result<()> {
+    match (result, cleanup) {
+        (Ok(()), cleanup) => cleanup,
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup)) => {
+            Err(error.context(format!("cleanup also failed: {cleanup:#}")))
+        }
+    }
+}
+
+async fn mounted_session(
+    mut bridge: JoinHandle<std::io::Result<()>>,
+    stop: oneshot::Sender<()>,
+    config: &Config,
+    gio: &Path,
+    exit: impl Future<Output = Result<()>>,
+    interrupted: impl Future<Output = Result<()>>,
+) -> Result<()> {
+    let mut mount_attempted = false;
+    let mut bridge_finished = false;
+    let session = AssertUnwindSafe(async {
+        tokio::select! {
+            result = &mut bridge => {
+                bridge_finished = true;
+                bridge_result(result)?;
+                bail!("WebDAV bridge stopped unexpectedly");
+            }
+            result = async {
+                mount_attempted = true;
+                mount(config, gio).await?;
+                exit.await
+            } => result,
+            result = interrupted => result,
+        }
+    })
+    .catch_unwind()
+    .await;
+    let mut result = match session {
+        Ok(result) => result,
+        Err(panic) => {
+            let message = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            Err(anyhow::anyhow!("mounted session panicked: {message}"))
+        }
+    };
+
+    // Keep serving while GVfs disconnects, including after a partial mount failure.
+    if mount_attempted {
+        result = cleanup_result(result, unmount(config, gio).await);
+    }
+    let _ = stop.send(());
+    if !bridge_finished {
+        let stopped = match tokio::time::timeout(Duration::from_secs(5), &mut bridge).await {
+            Ok(result) => bridge_result(result),
+            Err(_) => {
+                bridge.abort();
+                let _ = bridge.await;
+                Err(anyhow::anyhow!("WebDAV bridge shutdown timed out"))
+            }
+        };
+        result = cleanup_result(result, stopped);
+    }
+    result
+}
+
+fn wait_for_exit(input: impl BufRead) -> Result<()> {
+    for line in input.lines() {
+        let line = line.context("cannot read exit command")?;
+        if line.trim() == "exit" {
+            return Ok(());
+        }
+        eprintln!("Unknown command. Type exit to unmount and stop.");
+    }
+    // A closed terminal must not leave the filesystem mounted.
+    Ok(())
+}
+
+async fn exit_command() -> Result<()> {
+    let (send, received) = oneshot::channel();
+    // Tokio stdin can block runtime shutdown after a signal while awaiting a line.
+    std::thread::Builder::new()
+        .name("nemo-exit-command".into())
+        .spawn(move || {
+            let _ = send.send(wait_for_exit(std::io::stdin().lock()));
+        })
+        .context("cannot start exit command reader")?;
+    received.await.context("exit command reader stopped")?
+}
+
+fn shutdown() -> Result<impl Future<Output = Result<()>>> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("cannot install SIGTERM handler")?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .context("cannot install SIGINT handler")?;
+    Ok(async move {
+        tokio::select! {
+            _ = interrupt.recv() => Ok(()),
+            _ = terminate.recv() => Ok(()),
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::TempDir;
+    use tokio::io::AsyncReadExt;
+
+    static GIO_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct Gio {
+        directory: TempDir,
+        executable: PathBuf,
+        config: Config,
+        _process_lock: tokio::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Gio {
+        async fn new(mount_status: u8, info_status: u8, unmount_status: u8) -> Self {
+            // Concurrent forks can inherit writable script descriptors and cause ETXTBSY.
+            let process_lock = GIO_LOCK.lock().await;
+            let directory = tempfile::tempdir().unwrap();
+            let executable = directory.path().join("gio");
+            std::fs::write(
+                &executable,
+                format!(
+                    "#!/bin/sh\n\
+                     printf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/calls\"\n\
+                     if [ \"$2\" = --unmount ]; then exit {unmount_status}; fi\n\
+                     if [ \"$1\" = info ]; then exit {info_status}; fi\n\
+                     read -r password\n\
+                     [ \"$password\" = test-password ] || exit 99\n\
+                     exit {mount_status}\n"
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            Self {
+                directory,
+                executable,
+                config: Config {
+                    server: "unused".into(),
+                    port: 9843,
+                    password: "test-password".into(),
+                },
+                _process_lock: process_lock,
+            }
+        }
+
+        fn calls(&self) -> String {
+            std::fs::read_to_string(self.directory.path().join("calls")).unwrap()
+        }
+
+        async fn bridge(&mut self) -> (JoinHandle<std::io::Result<()>>, oneshot::Sender<()>) {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            self.config.port = listener.local_addr().unwrap().port();
+            let (stop, stopped) = oneshot::channel();
+            let calls = self.directory.path().join("calls");
+            let bridge = tokio::spawn(async move {
+                let result = axum::serve(listener, axum::Router::new())
+                    .with_graceful_shutdown(async {
+                        let _ = stopped.await;
+                    })
+                    .await;
+                let mut log = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(calls)?;
+                writeln!(log, "bridge stopped")?;
+                result
+            });
+            (bridge, stop)
+        }
+    }
+
+    #[test]
+    fn combined_command_arguments() {
+        for command in ["serve", "mount"] {
+            assert!(matches!(
+                Args::try_parse_from(["nemo", command]).unwrap().command,
+                Operation::Serve
+            ));
+        }
+        assert!(Args::try_parse_from(["nemo", "unmount"]).is_err());
+    }
+
+    #[test]
+    fn exit_commands_and_closed_or_invalid_input() {
+        let mut input = std::io::Cursor::new(b"help\n exit \nstill here\n");
+        wait_for_exit(&mut input).unwrap();
+        assert_eq!(
+            &input.get_ref()[input.position() as usize..],
+            b"still here\n"
+        );
+        wait_for_exit(&b""[..]).unwrap();
+        assert!(wait_for_exit(&b"\xff\n"[..]).is_err());
+    }
+
+    #[tokio::test]
+    async fn exit_unmounts_before_stopping_the_live_bridge() {
+        let mut gio = Gio::new(0, 0, 0).await;
+        let (bridge, stop) = gio.bridge().await;
+        let port = gio.config.port;
+        mounted_session(
+            bridge,
+            stop,
+            &gio.config,
+            &gio.executable,
+            async move {
+                let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+                stream
+                    .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .await?;
+                let mut response = String::new();
+                stream.read_to_string(&mut response).await?;
+                assert!(response.starts_with("HTTP/1.1 404"));
+                wait_for_exit(&b"exit\n"[..])
+            },
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+        let uri = gio.config.dav_uri();
+        assert_eq!(
+            gio.calls(),
+            format!("mount {uri}\ninfo {uri}\nmount --unmount {uri}\nbridge stopped\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn mount_and_access_errors_still_unmount() {
+        for (mount, info) in [(1, 0), (0, 1)] {
+            let mut gio = Gio::new(mount, info, 0).await;
+            let (bridge, stop) = gio.bridge().await;
+            let error = mounted_session(
+                bridge,
+                stop,
+                &gio.config,
+                &gio.executable,
+                std::future::pending(),
+                std::future::pending(),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error.to_string().contains(if mount != 0 {
+                    "GVfs mount failed"
+                } else {
+                    "not accessible"
+                }),
+                "{error:#}"
+            );
+            assert!(gio.calls().ends_with(&format!(
+                "mount --unmount {}\nbridge stopped\n",
+                gio.config.dav_uri()
+            )));
+        }
+    }
+
+    #[tokio::test]
+    async fn panic_and_bridge_failure_still_unmount() {
+        for panic in [false, true] {
+            let mut gio = Gio::new(0, 0, 0).await;
+            let (bridge, stop) = gio.bridge().await;
+            let abort = bridge.abort_handle();
+            let error = mounted_session(
+                bridge,
+                stop,
+                &gio.config,
+                &gio.executable,
+                async move {
+                    if panic {
+                        panic!("fatal session error");
+                    }
+                    abort.abort();
+                    std::future::pending().await
+                },
+                std::future::pending(),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error.to_string().contains(if panic {
+                    "fatal session error"
+                } else {
+                    "bridge task failed"
+                }),
+                "{error:#}"
+            );
+            assert!(gio
+                .calls()
+                .contains(&format!("mount --unmount {}\n", gio.config.dav_uri())));
+        }
+    }
+
+    #[tokio::test]
+    async fn interruption_and_input_failure_still_unmount() {
+        for interrupted in [false, true] {
+            let mut gio = Gio::new(0, 0, 0).await;
+            let (bridge, stop) = gio.bridge().await;
+            let (mounted, ready) = oneshot::channel();
+            let result = mounted_session(
+                bridge,
+                stop,
+                &gio.config,
+                &gio.executable,
+                async move {
+                    if interrupted {
+                        mounted.send(()).unwrap();
+                        std::future::pending().await
+                    } else {
+                        wait_for_exit(&b"\xff\n"[..])
+                    }
+                },
+                async move {
+                    ready.await?;
+                    Ok(())
+                },
+            )
+            .await;
+            if interrupted {
+                result.unwrap();
+            } else {
+                assert!(result.unwrap_err().to_string().contains("cannot read exit"));
+            }
+            assert!(gio.calls().ends_with(&format!(
+                "mount --unmount {}\nbridge stopped\n",
+                gio.config.dav_uri()
+            )));
+        }
+    }
+
+    #[tokio::test]
+    async fn unmount_failure_is_reported_on_normal_exit() {
+        let mut gio = Gio::new(0, 0, 1).await;
+        let (bridge, stop) = gio.bridge().await;
+        let error = mounted_session(
+            bridge,
+            stop,
+            &gio.config,
+            &gio.executable,
+            async { Ok(()) },
+            std::future::pending(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("GVfs unmount failed"),
+            "{error:#}"
+        );
+        assert!(gio.calls().ends_with("bridge stopped\n"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_errors_preserve_the_original_failure() {
+        let mut gio = Gio::new(0, 1, 1).await;
+        let (bridge, stop) = gio.bridge().await;
+        let error = mounted_session(
+            bridge,
+            stop,
+            &gio.config,
+            &gio.executable,
+            std::future::pending(),
+            std::future::pending(),
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("GVfs unmount failed"));
+        assert!(message.contains("not accessible"));
+        assert!(gio.calls().ends_with("bridge stopped\n"));
+    }
 
     #[test]
     fn invite_and_join_arguments() {

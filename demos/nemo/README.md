@@ -19,8 +19,8 @@ sudo apt install nemo gvfs-backends gvfs-fuse libglib2.0-bin
 ```
 
 `gvfs-fuse` is optional: it provides compatibility for applications that do not
-use GIO. Run the bridge and mount commands as your desktop user, not with `sudo`.
-Headless HTTP access works without a desktop session, but GVfs needs session D-Bus.
+use GIO. Run the demo as your desktop user, not with `sudo`.
+GVfs needs session D-Bus.
 
 ## Run
 
@@ -39,18 +39,15 @@ RISC0_SKIP_BUILD=1 target/debug/encrypted-spaces-backend-server \
   --space-root "$HOME/.local/share/encrypted-spaces-nemo/server"
 ```
 
-Create a space once, then start the bridge:
+Create a space once, then start the bridge and mount it in Nemo:
 
 ```sh
 target/debug/encrypted-spaces-nemo init --server ws://127.0.0.1:8080/ws
 target/debug/encrypted-spaces-nemo serve
 ```
 
-While `serve` is running, mount from another terminal in your desktop session:
-
-```sh
-target/debug/encrypted-spaces-nemo mount
-```
+`serve` starts the local WebDAV server, mounts it with GVfs, and waits for an
+`exit` command in the same terminal. `mount` is an alias for this combined command.
 
 Select the new WebDAV mount in Nemo's sidebar. You can also open it directly:
 
@@ -60,13 +57,12 @@ nemo "$(target/debug/encrypted-spaces-nemo uri)"
 
 Use Nemo's bookmark command to retain a named "Encrypted Spaces" shortcut
 between sessions. A bookmark does not start the bridge automatically.
-Unmount before stopping the bridge:
+Type `exit` in the bridge's terminal to unmount before stopping the server.
+Ctrl+C, SIGTERM, and closed stdin also trigger cleanup. Fatal errors and unwinding
+panics attempt to unmount before exiting; cleanup failures are reported. SIGKILL
+and process aborts cannot run cleanup.
 
-```sh
-target/debug/encrypted-spaces-nemo unmount
-```
-
-On subsequent runs, use `serve` and `mount`, not `init`. The backend's
+On subsequent runs, use `serve`, not `init`. The backend's
 process must remain running, and the client's profile must be preserved.
 **The reference backend currently keeps metadata/history in memory: restarting
 it loses the space even with `--space-root`.** That flag preserves file blobs,
@@ -94,8 +90,8 @@ Use `wss://` with a system-trusted certificate for remote connections.
 To reopen your own existing space, preserve its profile and run `serve`, not
 `init`. A server URL alone does not grant access to someone else's space.
 
-To invite another user to your current space, first unmount and stop `serve`
-(Ctrl+C in its terminal), leaving the backend running. Then:
+To invite another user to your current space, first exit `serve`
+(type `exit` or press Ctrl+C in its terminal), leaving the backend running. Then:
 
 ```sh
 target/debug/encrypted-spaces-nemo invite --output ./bob-invite.json
@@ -112,8 +108,6 @@ On the new user's machine:
 ```sh
 target/debug/encrypted-spaces-nemo join --invite ./bob-invite.json
 target/debug/encrypted-spaces-nemo serve
-# In another terminal:
-target/debug/encrypted-spaces-nemo mount
 ```
 
 `join` creates a new local profile, rotates the invited member's provisional
@@ -174,5 +168,6 @@ encrypted-spaces backend, including persistence/restoration, Unicode names,
 range reads, conditional overwrites, directory moves/copies/deletes, interrupted
 transfers, concurrent upload conflicts, protected root operations and profile
 locking, plus private invite export, joined-user restoration, onward invitations,
-and file access by different members. A desktop installation is still needed to
-exercise Nemo itself.
+and file access by different members. CLI tests use a fake GIO executable to check
+mount/unmount ordering and cleanup after exit, interruption, errors and panics.
+A desktop installation is still needed to exercise Nemo itself.
