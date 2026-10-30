@@ -47,7 +47,7 @@ target/debug/encrypted-spaces-nemo serve
 ```
 
 `serve` starts the local WebDAV server, mounts it with GVfs, and waits for an
-`exit` command in the same terminal.
+`quit` command in the same terminal.
 
 Select the new WebDAV mount in Nemo's sidebar. You can also open it directly:
 
@@ -57,7 +57,7 @@ nemo "$(target/debug/encrypted-spaces-nemo uri)"
 
 Use Nemo's bookmark command to retain a named "Encrypted Spaces" shortcut
 between sessions. A bookmark does not start the bridge automatically.
-Type `exit` in the bridge's terminal to unmount before stopping the server.
+Type `quit` in the bridge's terminal to unmount before stopping the server.
 Ctrl+C, SIGTERM, and closed stdin also trigger cleanup. Fatal errors and unwinding
 panics attempt to unmount before exiting; cleanup failures are reported. SIGKILL
 and process aborts cannot run cleanup.
@@ -100,7 +100,7 @@ invite --output ./bob-invite.json
 The bridge stays mounted and uses its existing SDK session to create the invite
 and save updated state. Paths containing spaces can be quoted, for example
 `invite --output "./Bob invites/invite.json"`. Command and invitation errors are
-reported without ending the terminal session; type `exit` to unmount and stop.
+reported without ending the terminal session; type `quit` to unmount and stop.
 
 Alternatively, when `serve` is stopped, use the standalone command, leaving the
 backend running:
@@ -181,7 +181,7 @@ range reads, conditional overwrites, directory moves/copies/deletes, interrupted
 transfers, concurrent upload conflicts, protected root operations and profile
 locking, plus private invite export, joined-user restoration, onward invitations,
 and file access by different members. CLI tests use a fake GIO executable to check
-mount/unmount ordering and cleanup after exit, interruption, errors and panics.
+mount/unmount ordering and cleanup after quit, interruption, errors and panics.
 Terminal tests also create invitations through the live filesystem session and
 check joined-user access, quoted paths, command errors and invitation failures.
 A desktop installation is still needed to exercise Nemo itself.

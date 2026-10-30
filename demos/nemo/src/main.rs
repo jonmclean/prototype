@@ -53,7 +53,7 @@ enum Operation {
         #[arg(long)]
         output: PathBuf,
     },
-    /// Start the bridge and mount in Nemo; type exit to unmount and stop.
+    /// Start the bridge and mount in Nemo; type quit to unmount and stop.
     Serve,
     /// Print the GVfs URI (no password).
     Uri,
@@ -74,7 +74,7 @@ enum TerminalCommand {
         output: PathBuf,
     },
     /// Unmount and stop the bridge.
-    Exit,
+    Quit,
 }
 
 fn print_invite(output: &Path) {
@@ -207,7 +207,7 @@ async fn mount(config: &Config, gio: &Path) -> Result<()> {
         bail!("GVfs mounted but the filesystem is not accessible");
     }
     println!("Mounted in Nemo's sidebar: {}", config.dav_uri());
-    println!("Type exit to unmount and stop the bridge (or press Ctrl+C).");
+    println!("Type quit to unmount and stop the bridge (or press Ctrl+C).");
     println!("Type invite --output PATH to create an invitation without unmounting.");
     Ok(())
 }
@@ -246,7 +246,7 @@ async fn mounted_session(
     stop: oneshot::Sender<()>,
     config: &Config,
     gio: &Path,
-    exit: impl Future<Output = Result<()>>,
+    commands: impl Future<Output = Result<()>>,
     interrupted: impl Future<Output = Result<()>>,
 ) -> Result<()> {
     let mut mount_attempted = false;
@@ -261,7 +261,7 @@ async fn mounted_session(
             result = async {
                 mount_attempted = true;
                 mount(config, gio).await?;
-                exit.await
+                commands.await
             } => result,
             result = interrupted => result,
         }
@@ -302,7 +302,7 @@ async fn mounted_session(
 fn read_commands(input: impl BufRead, send: mpsc::Sender<Result<String>>) {
     for line in input.lines() {
         let line = line.context("cannot read terminal command");
-        let done = line.as_ref().map_or(true, |line| line.trim() == "exit");
+        let done = line.as_ref().map_or(true, |line| line.trim() == "quit");
         if send.blocking_send(line).is_err() || done {
             break;
         }
@@ -337,7 +337,7 @@ async fn run_commands(
             continue;
         }
         match parse_terminal_command(&line) {
-            Ok(TerminalCommand::Exit) => return Ok(()),
+            Ok(TerminalCommand::Quit) => return Ok(()),
             Ok(TerminalCommand::Invite { output }) => {
                 match filesystem.export_invite(&output, server.to_owned()).await {
                     Ok(()) => print_invite(&output),
@@ -452,12 +452,12 @@ mod tests {
     }
 
     #[test]
-    fn exit_commands_and_closed_or_invalid_input() {
-        let mut input = std::io::Cursor::new(b"help\n exit \nstill here\n");
+    fn quit_commands_and_closed_or_invalid_input() {
+        let mut input = std::io::Cursor::new(b"help\n quit \nstill here\n");
         let (send, mut received) = mpsc::channel(16);
         read_commands(&mut input, send);
         assert_eq!(received.try_recv().unwrap().unwrap(), "help");
-        assert_eq!(received.try_recv().unwrap().unwrap(), " exit ");
+        assert_eq!(received.try_recv().unwrap().unwrap(), " quit ");
         assert_eq!(
             &input.get_ref()[input.position() as usize..],
             b"still here\n"
@@ -480,10 +480,16 @@ mod tests {
             _ => panic!("expected invite"),
         }
         assert!(matches!(
-            parse_terminal_command(" exit ").unwrap(),
-            TerminalCommand::Exit
+            parse_terminal_command(" quit ").unwrap(),
+            TerminalCommand::Quit
         ));
-        for invalid in ["invite", "mount", "exit extra", "invite --output 'unclosed"] {
+        for invalid in [
+            "invite",
+            "mount",
+            "exit",
+            "quit extra",
+            "invite --output 'unclosed",
+        ] {
             assert!(parse_terminal_command(invalid).is_err());
         }
     }
@@ -521,10 +527,10 @@ mod tests {
             format!("invite --output '{}'", invite_path.display()),
             format!("invite --output '{}'", invite_path.display()),
             format!("invite --output '{}'", second_path.display()),
-            "exit".to_owned(),
+            "quit".to_owned(),
             format!(
                 "invite --output '{}'",
-                directory.path().join("after-exit").display()
+                directory.path().join("after-quit").display()
             ),
         ] {
             send.send(Ok(line)).await.unwrap();
@@ -534,7 +540,7 @@ mod tests {
             .await
             .unwrap();
         assert!(second_path.exists());
-        assert!(!directory.path().join("after-exit").exists());
+        assert!(!directory.path().join("after-quit").exists());
         let bundle: InviteBundle =
             serde_json::from_slice(&std::fs::read(&invite_path).unwrap()).unwrap();
         assert_eq!(bundle.server, "ws://example.test/ws");
@@ -590,7 +596,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exit_unmounts_before_stopping_the_live_bridge() {
+    async fn quit_unmounts_before_stopping_the_live_bridge() {
         let mut gio = Gio::new(0, 0, 0).await;
         let (bridge, stop) = gio.bridge().await;
         let port = gio.config.port;
