@@ -92,6 +92,10 @@ The design targets four security properties:
 | `backend/`     | Reference server implementation                         |
 | `demos/`       | Example applications                                    |
 
+The [Android file client](demos/android/README.md) connects to remote storage,
+browses the desktop demo's files, and previews decrypted contents in memory
+without saving them on the device.
+
 ## Using the SDK
 
 The `sdk/` crate is the main interface for application developers. It

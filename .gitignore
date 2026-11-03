@@ -15,3 +15,9 @@ logfile.txt
 target
 **/node_modules/**
 vendor/
+demos/tauri/__pycache__/
+demos/android/.gradle/
+demos/android/.tools/
+demos/android/local.properties
+demos/android/app/build/
+demos/android/app/src/*/jniLibs/

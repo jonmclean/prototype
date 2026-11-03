@@ -1,0 +1,27 @@
+<resources>
+    <string name="app_name">Spaces Files</string>
+    <string name="title">Encrypted Spaces Files</string>
+    <string name="warning">Research demo. Import trusted desktop state only. File contents stay in memory and are never saved locally.</string>
+    <string name="endpoint_hint">wss://storage.example.org/ws</string>
+    <string name="import_snapshot">Import snapshot</string>
+    <string name="restore">Reconnect</string>
+    <string name="certificate">Trust certificate</string>
+    <string name="forget">Forget space</string>
+    <string name="refresh">Refresh</string>
+    <string name="up">Up</string>
+    <string name="disconnected">Import a desktop chat_snapshot.json to connect.</string>
+    <string name="working">Working</string>
+    <string name="empty">This folder is empty.</string>
+    <plurals name="file_count">
+        <item quantity="one">%1$d entry. Tap a folder to browse or a file to read.</item>
+        <item quantity="other">%1$d entries. Tap a folder to browse or a file to read.</item>
+    </plurals>
+    <string name="preview">Preview only. Nothing saved to this device.</string>
+    <string name="text_truncated">Preview limited to the first 256 KiB.</string>
+    <string name="binary_preview">Read into memory: %1$d B. This file type has no preview in the initial demo. Nothing was saved locally.</string>
+    <string name="invalid_image">This image could not be decoded.</string>
+    <string name="cert_added">Certificate added for this session. Reconnect to apply it.</string>
+    <string name="error">Error: %1$s</string>
+    <string name="folder">Folder: %1$s</string>
+    <string name="file">%1$s (%2$d B)</string>
+</resources>
