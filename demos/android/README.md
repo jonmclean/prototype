@@ -12,7 +12,8 @@ proofs and the ciphertext content hash before decrypting a file.
 ## Build on Linux
 
 Install Rust/rustup, Perl, unzip, and JDK 17 or 21. Install these pinned Android
-and Gradle tools (or use equivalent existing installations):
+tools (or use equivalent existing installations). No separate Gradle installation
+is needed: the checked-in wrapper downloads and caches Gradle 8.11.1 automatically.
 
 ```bash
 cd demos/android
@@ -26,15 +27,13 @@ export ANDROID_HOME="$PWD/.tools/android-sdk"
 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
   "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
-curl -fL https://services.gradle.org/distributions/gradle-8.11.1-bin.zip -o .tools/gradle.zip
-unzip -q .tools/gradle.zip -d .tools
 ./build.sh debug arm64-v8a
 ```
 
 `build.sh` compiles the SDK/JNI library using the NDK and then packages the APK
-with Gradle. OpenSSL is vendored for Android; it needs no device-side OpenSSL
-installation. First builds download Rust and Maven dependencies and can take
-several minutes. All local tool downloads/builds are ignored by Git.
+with `./gradlew`. OpenSSL is vendored for Android; it needs no device-side OpenSSL
+installation. First builds download Gradle, Rust, and Maven dependencies and can
+take several minutes. All local tool downloads/builds are ignored by Git.
 
 APK: `app/build/outputs/apk/debug/app-debug.apk`. Minimum Android: 8.0 (API 26).
 
@@ -44,8 +43,9 @@ so a release cannot accidentally package a debug SDK.
 For release, run `./build.sh release arm64-v8a`. The release APK is unsigned;
 configure your own signing before distributing it. Release mode rejects `ws://`.
 
-Override `ANDROID_HOME`, `ANDROID_NDK_HOME`, `GRADLE_BIN`, or `GRADLE_USER_HOME`
-to use installed tools. The script currently supports Linux x86-64 build hosts.
+Override `ANDROID_HOME` or `ANDROID_NDK_HOME` to use installed Android tools.
+`build.sh` defaults `GRADLE_USER_HOME` to `.tools/gradle-home`; override it to use
+a different Gradle cache. The script currently supports Linux x86-64 build hosts.
 Rust output is isolated in the repository's `target/android`.
 
 ```bash
@@ -134,7 +134,7 @@ cd demos/android
 export JAVA_HOME=/path/to/jdk-21
 export ANDROID_HOME="$PWD/.tools/android-sdk"
 export GRADLE_USER_HOME="$PWD/.tools/gradle-home"
-.tools/gradle-8.11.1/bin/gradle --no-daemon -PspacesAbi=x86_64 connectedDebugAndroidTest
+./gradlew --no-daemon -PspacesAbi=x86_64 connectedDebugAndroidTest
 ```
 
 The certificate and inode arguments to `remote_files` are optional. This helper
@@ -165,7 +165,7 @@ demos/android/.tools/android-sdk/platform-tools/adb push \
   demos/android/.tools/test-connection.json /data/local/tmp/android-connection.json
 
 cd demos/android
-.tools/gradle-8.11.1/bin/gradle --no-daemon -PspacesAbi=x86_64 \
+./gradlew --no-daemon -PspacesAbi=x86_64 \
   -Pandroid.testInstrumentationRunnerArguments.remoteSnapshot=/data/local/tmp/android-connection.json \
   connectedDebugAndroidTest
 ```

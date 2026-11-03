@@ -19,9 +19,8 @@ export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$PWD/.tools/android-sdk
 export ANDROID_SDK_ROOT="$ANDROID_HOME"
 ndk="${ANDROID_NDK_HOME:-$ANDROID_HOME/ndk/27.2.12479018}"
 toolchain="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
-gradle="${GRADLE_BIN:-$PWD/.tools/gradle-8.11.1/bin/gradle}"
-if [[ ! -x "$toolchain/${compiler}26-clang" || ! -x "$gradle" ]]; then
-    echo "Missing NDK or Gradle. See README.md for the pinned prerequisites." >&2
+if [[ ! -x "$toolchain/${compiler}26-clang" ]]; then
+    echo "Missing NDK. See README.md for the pinned prerequisites." >&2
     exit 1
 fi
 if [[ ! -x "${JAVA_HOME:-}/bin/javac" ]]; then
@@ -43,4 +42,4 @@ mkdir -p "app/src/$mode/jniLibs/$abi"
 cp "$CARGO_TARGET_DIR/$target/$profile/libspaces_android.so" "app/src/$mode/jniLibs/$abi/"
 "$toolchain/llvm-strip" --strip-debug "app/src/$mode/jniLibs/$abi/libspaces_android.so"
 export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$PWD/.tools/gradle-home}"
-"$gradle" --no-daemon --console=plain "-PspacesAbi=$abi" "$task"
+./gradlew --no-daemon --console=plain "-PspacesAbi=$abi" "$task"
