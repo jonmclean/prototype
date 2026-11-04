@@ -1,5 +1,7 @@
 package org.encryptedspaces.android
 
+import android.Manifest
+import android.os.Build
 import android.util.Base64
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -21,6 +23,11 @@ class RemoteFilesTest {
         // Report skipped unless the host supplied a real fixture deployment.
         assumeNotNull(snapshotPath)
         val context = InstrumentationRegistry.getInstrumentation().targetContext
+        if (Build.VERSION.SDK_INT >= 37) {
+            InstrumentationRegistry.getInstrumentation().uiAutomation.grantRuntimePermission(
+                context.packageName, Manifest.permission.ACCESS_LOCAL_NETWORK
+            )
+        }
         val connection = JSONObject(File(checkNotNull(snapshotPath)).readText())
         val certificates = JSONArray()
         val store = KeyStore.getInstance("AndroidCAStore").apply { load(null) }

@@ -15,6 +15,8 @@ Install Rust/rustup, Perl, unzip, and JDK 17 or 21. Install these pinned Android
 tools (or use equivalent existing installations). No separate Gradle installation
 is needed: the checked-in wrapper downloads and caches Gradle 9.8.2 automatically.
 The build uses Android Gradle plugin 9.5.0 with built-in Kotlin support.
+It compiles against Android 17 SDK 37.2 and targets API 37; the minimum supported
+version remains Android 8.0 (API 26).
 
 ```bash
 cd demos/android
@@ -27,7 +29,7 @@ export JAVA_HOME=/path/to/jdk-21
 export ANDROID_HOME="$PWD/.tools/android-sdk"
 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-  "platform-tools" "platforms;android-35" "build-tools;36.0.0" "ndk;27.2.12479018"
+  "platform-tools" "platforms;android-37.2" "build-tools;37.0.0" "ndk;27.2.12479018"
 ./build.sh debug arm64-v8a
 ```
 
@@ -109,6 +111,12 @@ private key. Its SAN must match the hostname/IP you enter.
 
 Debug builds allow `ws://` for an isolated test server. From the standard Android
 emulator, use `ws://10.0.2.2:8080/ws` to reach the host's localhost server.
+On Android 17 and later, the app requests nearby-device (`ACCESS_LOCAL_NETWORK`)
+permission before network operations, including import/reconnect and file reads.
+Allow it for LAN or emulator-host storage. If denied, the app explains how to
+enable it in system settings and offers an explicit internet-only attempt;
+public internet storage does not require this permission. Older Android versions
+do not show this permission prompt.
 On a physical device, use a reachable LAN address or `adb reverse tcp:8080
 tcp:8080` and `ws://127.0.0.1:8080/ws`. The server runs **outside** the phone:
 

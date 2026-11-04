@@ -11,6 +11,10 @@
     <string name="up">Up</string>
     <string name="disconnected">Import a desktop chat_snapshot.json to connect.</string>
     <string name="working">Working</string>
+    <string name="local_network_request">Allow nearby-device access to connect to LAN or emulator-host storage.</string>
+    <string name="local_network_title">Local network access denied</string>
+    <string name="local_network_denied">LAN and emulator-host storage require nearby-device permission. Enable it in system Settings > Apps > Spaces Files > Permissions. You can continue without it for internet-only storage.</string>
+    <string name="internet_only">Continue internet-only</string>
     <string name="empty">This folder is empty.</string>
     <plurals name="file_count">
         <item quantity="one">%1$d entry. Tap a folder to browse or a file to read.</item>

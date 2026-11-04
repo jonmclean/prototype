@@ -4,12 +4,17 @@ plugins {
 
 android {
     namespace = "org.encryptedspaces.android"
-    compileSdk = 35
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 2
+        }
+    }
+    buildToolsVersion = "37.0.0"
     ndkVersion = "27.2.12479018"
     defaultConfig {
         applicationId = "org.encryptedspaces.android"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 37
         versionCode = 1
         versionName = "0.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

@@ -1,10 +1,13 @@
 package org.encryptedspaces.android
 
+import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Build
 import android.graphics.BitmapFactory
 import android.util.AtomicFile
 import android.util.Base64
@@ -36,6 +39,8 @@ class MainActivity : Activity() {
     private var busy = false
     private var extraCertificates = emptyList<String>()
     private var previewDialog: AlertDialog? = null
+    private var networkPermissionDialog: AlertDialog? = null
+    private var pendingNetworkAction: (() -> Unit)? = null
     private val snapshotFile get() = AtomicFile(File(noBackupFilesDir, "connection.json"))
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -72,7 +77,7 @@ class MainActivity : Activity() {
         button(connectionRow, R.string.import_snapshot) { openDocument(IMPORT_SNAPSHOT) }
         reconnect = button(connectionRow, R.string.restore) {
             val endpoint = address.text.toString().trim()
-            operation {
+            networkOperation {
                 val connection = JSONObject(snapshotFile.openRead().use { it.reader().readText() })
                 connect(connection, endpoint)
             }
@@ -97,10 +102,10 @@ class MainActivity : Activity() {
         }
         val navigationRow = row()
         up = button(navigationRow, R.string.up) {
-            operation { loadFolder(folders.dropLast(1)) }
+            networkOperation { loadFolder(folders.dropLast(1)) }
         }
         refresh = button(navigationRow, R.string.refresh) {
-            operation { loadFolder(folders.toList()) }
+            networkOperation { loadFolder(folders.toList()) }
         }
         breadcrumb = TextView(this).also { root.addView(it) }
         status = TextView(this).also {
@@ -111,7 +116,7 @@ class MainActivity : Activity() {
         list = ListView(this).apply {
             setOnItemClickListener { _, _, position, _ ->
                 val entry = entries[position]
-                operation {
+                networkOperation {
                     if (entry.getInt("type") == 2) {
                         loadFolder(folders + (entry.getLong("id") to entry.getString("name")))
                     } else {
@@ -150,7 +155,7 @@ class MainActivity : Activity() {
         when (requestCode) {
             IMPORT_SNAPSHOT -> {
                 val endpoint = address.text.toString().trim()
-                operation {
+                networkOperation {
                     connect(JSONObject(readDocument(uri, 16 * 1024 * 1024).toString(Charsets.UTF_8)), endpoint)
                 }
             }
@@ -319,6 +324,53 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun networkOperation(action: () -> Unit) {
+        if (busy || pendingNetworkAction != null) return
+        if (Build.VERSION.SDK_INT >= 37 &&
+            checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) != PackageManager.PERMISSION_GRANTED) {
+            pendingNetworkAction = action
+            status.setText(R.string.local_network_request)
+            updateControls()
+            requestPermissions(arrayOf(Manifest.permission.ACCESS_LOCAL_NETWORK), LOCAL_NETWORK_PERMISSION)
+        } else {
+            operation(action)
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != LOCAL_NETWORK_PERMISSION) return
+        val action = pendingNetworkAction ?: return
+        pendingNetworkAction = null
+        updateControls()
+        if (isFinishing || isDestroyed) return
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+            operation(action)
+        } else {
+            status.setText(R.string.local_network_denied)
+            val dialog = AlertDialog.Builder(this)
+                .setTitle(R.string.local_network_title)
+                .setMessage(R.string.local_network_denied)
+                .setPositiveButton(R.string.internet_only) { _, _ ->
+                    pendingNetworkAction = null
+                    operation(action)
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .create()
+            pendingNetworkAction = action
+            networkPermissionDialog = dialog
+            updateControls()
+            dialog.setOnDismissListener {
+                pendingNetworkAction = null
+                networkPermissionDialog = null
+                updateControls()
+            }
+            dialog.show()
+        }
+    }
+
     private fun operation(action: () -> Unit) {
         if (busy) return
         busy = true
@@ -351,14 +403,17 @@ class MainActivity : Activity() {
     }
 
     private fun updateControls() {
-        controls.forEach { it.isEnabled = !busy }
-        reconnect.isEnabled = !busy && snapshotFile.baseFile.exists()
-        forget.isEnabled = !busy && (connected || snapshotFile.baseFile.exists())
-        refresh.isEnabled = !busy && connected
-        up.isEnabled = !busy && connected && folders.size > 1
+        val available = !busy && pendingNetworkAction == null
+        controls.forEach { it.isEnabled = available }
+        reconnect.isEnabled = available && snapshotFile.baseFile.exists()
+        forget.isEnabled = available && (connected || snapshotFile.baseFile.exists())
+        refresh.isEnabled = available && connected
+        up.isEnabled = available && connected && folders.size > 1
     }
 
     override fun onDestroy() {
+        pendingNetworkAction = null
+        networkPermissionDialog?.dismiss()
         previewDialog?.dismiss()
         worker.shutdown()
         super.onDestroy()
@@ -367,5 +422,6 @@ class MainActivity : Activity() {
     companion object {
         private const val IMPORT_SNAPSHOT = 1
         private const val IMPORT_CERTIFICATE = 2
+        private const val LOCAL_NETWORK_PERMISSION = 3
     }
 }
