@@ -53,6 +53,12 @@ with `./gradlew`. OpenSSL is vendored for Android; it needs no device-side OpenS
 installation. First builds download Gradle, Rust, and Maven dependencies and can
 take several minutes. All local tool downloads/builds are ignored by Git.
 
+Android Studio and direct `./gradlew` builds do **not** rebuild the Rust library;
+they only check that a library exists for the selected ABI (ARM64 by default).
+After updating Rust/SDK code, rerun `./build.sh debug arm64-v8a` (or `x86_64`
+for that ABI) before installing. An `unknown variant 'join'` error means the APK
+contains the old snapshot-only JNI library, not that the invitation is invalid.
+
 APK: `app/build/outputs/apk/debug/app-debug.apk`. Minimum Android: 8.0 (API 26).
 
 For an x86-64 emulator, run `./build.sh debug x86_64`. Each APK includes only
