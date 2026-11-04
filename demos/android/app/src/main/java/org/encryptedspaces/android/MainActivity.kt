@@ -41,7 +41,7 @@ class MainActivity : Activity() {
     private var previewDialog: AlertDialog? = null
     private var networkPermissionDialog: AlertDialog? = null
     private var pendingNetworkAction: (() -> Unit)? = null
-    private val snapshotFile get() = AtomicFile(File(noBackupFilesDir, "connection.json"))
+    private val snapshotFile get() = AtomicFile(File(noBackupFilesDir, "invited-connection.json"))
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,12 +74,18 @@ class MainActivity : Activity() {
                 row.addView(this, LinearLayout.LayoutParams(0, -2, 1f))
             }
         val connectionRow = row()
-        button(connectionRow, R.string.import_snapshot) { openDocument(IMPORT_SNAPSHOT) }
+        button(connectionRow, R.string.import_invitation) {
+            if (address.text.toString().isBlank()) {
+                showError(IllegalArgumentException(getString(R.string.endpoint_required)))
+            } else {
+                openDocument(IMPORT_INVITATION)
+            }
+        }
         reconnect = button(connectionRow, R.string.restore) {
             val endpoint = address.text.toString().trim()
             networkOperation {
                 val connection = JSONObject(snapshotFile.openRead().use { it.reader().readText() })
-                connect(connection, endpoint)
+                restore(connection, endpoint)
             }
         }
         val trustRow = row()
@@ -153,10 +159,15 @@ class MainActivity : Activity() {
         if (resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         when (requestCode) {
-            IMPORT_SNAPSHOT -> {
+            IMPORT_INVITATION -> {
                 val endpoint = address.text.toString().trim()
                 networkOperation {
-                    connect(JSONObject(readDocument(uri, 16 * 1024 * 1024).toString(Charsets.UTF_8)), endpoint)
+                    val invitation = JSONObject(
+                        readDocument(uri, 1024 * 1024).toString(Charsets.UTF_8)
+                    )
+                    establishConnection(JSONObject()
+                        .put("command", "join")
+                        .put("invitation", invitation), endpoint)
                 }
             }
             IMPORT_CERTIFICATE -> operation {
@@ -187,10 +198,17 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun connect(connection: JSONObject, overrideAddress: String) {
+    private fun restore(connection: JSONObject, overrideAddress: String) {
         val endpoint = overrideAddress.ifEmpty {
             connection.getJSONObject("user_info").getString("ws_address")
         }
+        establishConnection(JSONObject()
+            .put("command", "restore")
+            .put("connection", connection), endpoint)
+    }
+
+    private fun establishConnection(request: JSONObject, endpoint: String) {
+        require(endpoint.isNotBlank()) { getString(R.string.endpoint_required) }
         runOnUiThread {
             connected = false
             entries = emptyList()
@@ -202,10 +220,8 @@ class MainActivity : Activity() {
             certificates.put(Base64.encodeToString(keyStore.getCertificate(alias).encoded, Base64.NO_WRAP))
         }
         extraCertificates.forEach { certificates.put(it) }
-        val snapshot = native(JSONObject()
-            .put("command", "connect")
+        val snapshot = native(request
             .put("address", endpoint)
-            .put("connection", connection)
             .put("certificates", certificates)) as JSONObject
         saveSnapshot(snapshot)
         runOnUiThread {
@@ -420,7 +436,7 @@ class MainActivity : Activity() {
     }
 
     companion object {
-        private const val IMPORT_SNAPSHOT = 1
+        private const val IMPORT_INVITATION = 1
         private const val IMPORT_CERTIFICATE = 2
         private const val LOCAL_NETWORK_PERMISSION = 3
     }

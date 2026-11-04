@@ -30,4 +30,21 @@ class BridgeTest {
             assertTrue(response.getBoolean("ok"))
         }
     }
+
+    @Test fun desktopSnapshotCannotBeUsedAsAnInvitation() {
+        val request = JSONObject().put("command", "join")
+            .put("address", "ws://10.0.2.2:18082/ws")
+            .put("certificates", org.json.JSONArray())
+            .put("invitation", JSONObject()
+                .put("user_info", JSONObject())
+                .put("space_snapshot", JSONObject()))
+        val response = JSONObject(NativeBridge.request(request.toString()))
+        assertFalse(response.getBoolean("ok"))
+        assertTrue(response.getString("error").contains("Desktop snapshots cannot be imported"))
+    }
+
+    @Test fun oldSnapshotImportCommandIsNotAccepted() {
+        val response = JSONObject(NativeBridge.request("""{"command":"connect"}"""))
+        assertFalse(response.getBoolean("ok"))
+    }
 }

@@ -1,7 +1,7 @@
 # Android file client
 
 A native Kotlin Android client with a Rust JNI bridge to `encrypted-spaces-sdk`.
-It connects to an existing Encrypted Spaces server, lists the desktop demo's
+It joins an existing Encrypted Spaces server using an invitation, lists the desktop demo's
 `inodes` table, browses folders, and reads/decrypts files **in memory only**.
 There is no embedded server, file upload/edit/delete API, or prover.
 
@@ -36,6 +36,18 @@ export ANDROID_HOME="$PWD/.tools/android-sdk"
 ./build.sh debug arm64-v8a
 ```
 
+Invitation joins embed the desktop KDL schema, its initial commitment, and the
+trusted fast-forward guest image ID using the same build-time codegen as the
+desktop demo. Codegen runs on the build host; no server or prover is bundled
+in the APK. Install the RISC Zero build prerequisites used by the desktop demo
+to compile its guest, or set `ENCRYPTED_SPACES_FF_IMAGE_ID_FILE` to a trusted
+image-ID file from the server deployment and use `RISC0_SKIP_BUILD=1` to skip
+the local guest build. Skipping without that file produces stub trust anchors,
+which are suitable for compilation checks but not joining a working deployment.
+The local server needs its actual guest ELF and RISC Zero executor even when
+using development-mode proofs. Never obtain a trust anchor from the invitation
+or an untrusted server.
+
 `build.sh` compiles the SDK/JNI library using the NDK and then packages the APK
 with `./gradlew`. OpenSSL is vendored for Android; it needs no device-side OpenSSL
 installation. First builds download Gradle, Rust, and Maven dependencies and can
@@ -61,31 +73,31 @@ Rust output is isolated in the repository's `target/android`.
 ## Connect to remote storage
 
 1. In the desktop demo, create/join a space on the remote server and upload files
-   through its Files screen. Wait for the desktop's periodic snapshot save.
-1. Transfer its `chat_snapshot.json` to a location the Android document picker can
-   read, using a trusted channel. The default desktop snapshot is under the
-   app-data directory for `com.encrypted-spaces.demo` (see the desktop Tauri
-   configuration for the identifier in your build).
+   through its Files screen. Export a **new invitation** for the Android member.
+1. Transfer the invitation JSON to a location the Android document picker can
+   read, using a trusted channel.
 1. Open Spaces Files. Enter the server endpoint, for example
-   `wss://storage.example.org:8443/ws`, and tap **Import snapshot**. If the endpoint
-   field is empty, the address in the snapshot is used.
+   `wss://storage.example.org:8443/ws`, and tap **Import invitation**. The server
+   address is required; the SDK invitation does not contain an endpoint.
 1. Tap folders to browse; **Up** returns to the parent and **Refresh** synchronizes
    with the server. Tap a file to read it. Text/JSON/XML and images have simple
    previews. Other file types are read in memory and show a byte-count message.
 1. **Reconnect** restores the privately saved connection after restarting the app.
    **Forget space** removes that connection state.
 
-Snapshots contain private identity/key material and pin the schema, initial
-commitment, and FF image ID used by that deployment. Import only trusted
-snapshots. This first version restores the **same member identity** as the
-desktop; it does not consume invitation JSON or create a new member. For a
-separate phone identity, first join a separate desktop instance using an invite,
-then transfer that instance's snapshot. Avoid concurrently writing with a
-cloned identity. Android does not write user profiles/channels or modify files.
+The phone joins as the **invited member**, not as the desktop member. The SDK
+rotates the invitation's provisional keys to fresh permanent keys during join,
+so a consumed invitation cannot be used to join again. Invitations contain secret
+bootstrap credentials: import only trusted invitations and delete the transferred
+file from public/shared storage after joining. Use a fresh invitation after
+**Forget space** or clearing app data.
 
-Delete the transferred snapshot from public/shared storage after import.
-Only the connection/cryptographic snapshot is persisted in app-private,
-no-backup storage; the SDK's transient table cache is not serialized.
+**Desktop snapshots (`chat_snapshot.json`) cannot be imported.** Reconnect reads
+only this app's privately saved `invited-connection.json` in no-backup storage.
+Legacy `connection.json` files from the snapshot-import version are not restored;
+join again with a fresh invitation. The SDK's transient table cache is not
+serialized. Android does not write user profiles/channels or modify files;
+joining does update the invited member's authentication/key state on the server.
 
 ### No decrypted files on disk
 
@@ -125,7 +137,7 @@ tcp:8080` and `ws://127.0.0.1:8080/ws`. The server runs **outside** the phone:
 
 ```bash
 # From repository root
-RISC0_SKIP_BUILD=1 cargo run -p encrypted-spaces-backend-server -- \
+cargo run -p encrypted-spaces-backend-server -- \
   --schema demos/tauri/app_schema.kdl
 ```
 
@@ -141,8 +153,8 @@ uv run --with textual==8.2.8 python -m unittest discover \
   -s demos/tauri -p test_demo_launcher.py
 
 # Real existing server; listing + in-memory file read, no plaintext output file
-RISC0_SKIP_BUILD=1 cargo run -p encrypted-spaces-android --example remote_files -- \
-  /path/to/chat_snapshot.json wss://storage.example.org/ws 123 /path/to/public-cert.pem
+cargo run -p encrypted-spaces-android --example remote_files -- \
+  /path/to/fresh-invitation.json wss://storage.example.org/ws 123 /path/to/public-cert.pem
 
 # Android JNI instrumentation checks, after building the x86_64 debug library
 cd demos/android
@@ -153,41 +165,46 @@ export GRADLE_USER_HOME="$PWD/.tools/gradle-home"
 ```
 
 The certificate and inode arguments to `remote_files` are optional. This helper
-prints metadata and the decrypted byte count, never file contents or keys.
+consumes the supplied invitation for a disposable test member; it does not save
+reconnect state. Use a different fresh invitation for the phone. It prints
+metadata and the decrypted byte count, never file contents or keys.
 APK compilation, emulator JNI checks, and integration against the user's actual
 remote storage are separate checks; the latter requires a reachable endpoint
-and a valid deployment snapshot.
+and a fresh invitation for that deployment.
 
 ### Reproducible loopback protocol checks
 
 `seed_remote` is a **host-only** test fixture. It creates a new test space using
 the desktop KDL schema, uploads a small test file, and checks root/nested listing,
-in-memory reads, folder rejection, and restore through the real WebSocket/HTTP
-protocol. Its output file contains connection state, **not decrypted files**.
+invitation join/reuse rejection, in-memory reads, folder rejection, and private
+state restore through the real WebSocket/HTTP protocol. Its output file contains
+a separate fresh invitation for the emulator, **not decrypted files**.
 Host test/example dependencies can include the reference server and guest
 methods; none of these are regular Android runtime dependencies.
 
 ```bash
 # Terminal 1, repository root: use an isolated test storage directory
-RISC0_SKIP_BUILD=1 cargo run -p encrypted-spaces-backend-server -- \
+cargo run -p encrypted-spaces-backend-server -- \
   --schema demos/tauri/app_schema.kdl --port 18082 \
   --space-root demos/android/.tools/test-spaces
 
 # Terminal 2, repository root
-RISC0_SKIP_BUILD=1 cargo run -p encrypted-spaces-android --example seed_remote -- \
-  ws://127.0.0.1:18082/ws demos/android/.tools/test-connection.json
+cargo run -p encrypted-spaces-android --example seed_remote -- \
+  ws://127.0.0.1:18082/ws demos/android/.tools/test-invitation.json
 demos/android/.tools/android-sdk/platform-tools/adb push \
-  demos/android/.tools/test-connection.json /data/local/tmp/android-connection.json
+  demos/android/.tools/test-invitation.json /data/local/tmp/android-invitation.json
 
 cd demos/android
 ./gradlew --no-daemon -PspacesAbi=x86_64 \
-  -Pandroid.testInstrumentationRunnerArguments.remoteSnapshot=/data/local/tmp/android-connection.json \
+  -Pandroid.testInstrumentationRunnerArguments.remoteInvitation=/data/local/tmp/android-invitation.json \
   connectedDebugAndroidTest
 ```
 
-The remote instrumentation test is explicitly skipped if `remoteSnapshot` is
-not supplied. It compares app-private files before and after SDK reads, and
-the UI preview test also checks that previews create no local files and that
+The remote instrumentation test is explicitly skipped if `remoteInvitation` is
+not supplied. Generate a fresh invitation with `seed_remote` before each run.
+It joins through the invitation document-import flow, reconnects using the
+resulting private connection state, and compares app-private files before and
+after SDK reads. The UI preview test also checks that previews create no local files and that
 screenshots are blocked. To exercise TLS, start a separate TLS server, pass a
 public PEM/DER certificate as the optional final argument to `seed_remote`,
 and supply `remoteAddress=wss://10.0.2.2:PORT/ws` and

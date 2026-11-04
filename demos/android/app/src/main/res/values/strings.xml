@@ -1,15 +1,16 @@
 <resources>
     <string name="app_name">Spaces Files</string>
     <string name="title">Encrypted Spaces Files</string>
-    <string name="warning">Research demo. Import trusted desktop state only. File contents stay in memory and are never saved locally.</string>
+    <string name="warning">Research demo. Import trusted invitations only. File contents stay in memory and are never saved locally.</string>
     <string name="endpoint_hint">wss://storage.example.org/ws</string>
-    <string name="import_snapshot">Import snapshot</string>
+    <string name="import_invitation">Import invitation</string>
+    <string name="endpoint_required">Enter the server WebSocket address before importing an invitation.</string>
     <string name="restore">Reconnect</string>
     <string name="certificate">Trust certificate</string>
     <string name="forget">Forget space</string>
     <string name="refresh">Refresh</string>
     <string name="up">Up</string>
-    <string name="disconnected">Import a desktop chat_snapshot.json to connect.</string>
+    <string name="disconnected">Enter the server address and import an invitation to join. Desktop snapshots are not accepted.</string>
     <string name="working">Working</string>
     <string name="local_network_request">Allow nearby-device access to connect to LAN or emulator-host storage.</string>
     <string name="local_network_title">Local network access denied</string>

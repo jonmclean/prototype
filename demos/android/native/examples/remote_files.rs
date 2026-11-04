@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use spaces_android::{Client, Connection};
+use spaces_android::Client;
 use std::time::Duration;
 
 /// Exercises the phone's client core without saving decrypted file contents.
@@ -8,9 +8,9 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     anyhow::ensure!(
         (3..=5).contains(&args.len()),
-        "Usage: remote_files SNAPSHOT ADDRESS [INODE_ID] [TRUST_CERT]"
+        "Usage: remote_files INVITATION ADDRESS [INODE_ID] [TRUST_CERT]"
     );
-    let connection: Connection = serde_json::from_slice(&std::fs::read(&args[1])?)?;
+    let invitation = serde_json::from_slice(&std::fs::read(&args[1])?)?;
     let certificates = if args.len() == 5 {
         use base64::Engine;
         let bytes = std::fs::read(&args[4])?;
@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
     };
     tokio::time::timeout(Duration::from_secs(60), async {
         let client =
-            Client::connect(connection, &args[2], &certificates, cfg!(debug_assertions)).await?;
+            Client::join(invitation, &args[2], &certificates, cfg!(debug_assertions)).await?;
         for entry in client.list(0).await? {
             println!(
                 "{}: {} (type {}, {} bytes)",

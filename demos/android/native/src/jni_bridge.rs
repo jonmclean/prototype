@@ -16,7 +16,12 @@ use std::{
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 enum Request {
-    Connect {
+    Join {
+        invitation: Value,
+        address: String,
+        certificates: Vec<String>,
+    },
+    Restore {
         connection: Connection,
         address: String,
         certificates: Vec<String>,
@@ -46,14 +51,27 @@ fn execute(request: Request) -> Result<Value> {
     runtime.block_on(async {
         tokio::time::timeout(Duration::from_secs(60), async {
             match request {
-                Request::Connect {
+                Request::Join {
+                    invitation,
+                    address,
+                    certificates,
+                } => {
+                    *client = None;
+                    let new_client =
+                        Client::join(invitation, &address, &certificates, cfg!(debug_assertions))
+                            .await?;
+                    let snapshot = new_client.snapshot().await?;
+                    *client = Some(new_client);
+                    Ok(serde_json::to_value(snapshot)?)
+                }
+                Request::Restore {
                     connection,
                     address,
                     certificates,
                 } => {
                     // A failed replacement must not leave the previous account active.
                     *client = None;
-                    let new_client = Client::connect(
+                    let new_client = Client::restore(
                         connection,
                         &address,
                         &certificates,
