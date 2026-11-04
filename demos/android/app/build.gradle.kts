@@ -10,7 +10,7 @@ android {
         }
     }
     buildToolsVersion = "37.0.0"
-    ndkVersion = "27.2.12479018"
+    ndkVersion = "30.0.16248370"
     defaultConfig {
         applicationId = "org.encryptedspaces.android"
         minSdk = 26

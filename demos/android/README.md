@@ -11,10 +11,14 @@ proofs and the ciphertext content hash before decrypting a file.
 
 ## Build on Linux
 
-Install Rust/rustup, Perl, unzip, and JDK 17 or 21. Install these pinned Android
+Install Rust/rustup, Perl, unzip, and a full JDK 17 or newer (21 or 25 recommended).
+`build.sh` detects the JDK from `javac` on `PATH`, resolving symlinks, and exports
+`JAVA_HOME` for Gradle. A valid `JAVA_HOME` takes precedence; an invalid path is
+reported and falls back to detection. Install these pinned Android
 tools (or use equivalent existing installations). No separate Gradle installation
 is needed: the checked-in wrapper downloads and caches Gradle 9.8.2 automatically.
 The build uses Android Gradle plugin 9.5.0 with built-in Kotlin support.
+Native builds use NDK r30 LTS (`30.0.16248370`).
 It compiles against Android 17 SDK 37.2 and targets API 37; the minimum supported
 version remains Android 8.0 (API 26).
 
@@ -25,11 +29,10 @@ curl -fL https://dl.google.com/android/repository/commandlinetools-linux-1311475
   -o .tools/commandlinetools.zip
 unzip -q .tools/commandlinetools.zip -d .tools/android-sdk/cmdline-tools
 mv .tools/android-sdk/cmdline-tools/cmdline-tools .tools/android-sdk/cmdline-tools/latest
-export JAVA_HOME=/path/to/jdk-21
 export ANDROID_HOME="$PWD/.tools/android-sdk"
 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-  "platform-tools" "platforms;android-37.2" "build-tools;37.0.0" "ndk;27.2.12479018"
+  "platform-tools" "platforms;android-37.2" "build-tools;37.0.0" "ndk;30.0.16248370"
 ./build.sh debug arm64-v8a
 ```
 
@@ -129,6 +132,9 @@ RISC0_SKIP_BUILD=1 cargo run -p encrypted-spaces-backend-server -- \
 ## Checks
 
 ```bash
+# Repository root; build-script JDK detection, no Android/Rust build required
+python3 -m unittest discover -s demos/android -p test_build.py
+
 # Repository root; host-side core checks, not a device/integration test
 RISC0_SKIP_BUILD=1 cargo test -p encrypted-spaces-android --locked
 uv run --with textual==8.2.8 python -m unittest discover \
