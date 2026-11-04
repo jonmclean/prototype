@@ -17,7 +17,9 @@ target
 vendor/
 demos/tauri/__pycache__/
 demos/android/.gradle/
+demos/android/.idea/
 demos/android/.tools/
 demos/android/local.properties
 demos/android/app/build/
+demos/android/build/
 demos/android/app/src/*/jniLibs/

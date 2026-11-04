@@ -13,7 +13,8 @@ proofs and the ciphertext content hash before decrypting a file.
 
 Install Rust/rustup, Perl, unzip, and JDK 17 or 21. Install these pinned Android
 tools (or use equivalent existing installations). No separate Gradle installation
-is needed: the checked-in wrapper downloads and caches Gradle 8.11.1 automatically.
+is needed: the checked-in wrapper downloads and caches Gradle 9.8.2 automatically.
+The build uses Android Gradle plugin 9.5.0 with built-in Kotlin support.
 
 ```bash
 cd demos/android
@@ -26,7 +27,7 @@ export JAVA_HOME=/path/to/jdk-21
 export ANDROID_HOME="$PWD/.tools/android-sdk"
 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-  "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
+  "platform-tools" "platforms;android-35" "build-tools;36.0.0" "ndk;27.2.12479018"
 ./build.sh debug arm64-v8a
 ```
 
