@@ -7,6 +7,9 @@ use serde_json::Value;
 #[cfg(target_os = "android")]
 mod jni_bridge;
 
+#[cfg(any(target_os = "android", test))]
+mod diagnostics;
+
 include!(concat!(env!("OUT_DIR"), "/sdk_codegen.rs"));
 
 pub const MAX_READ_BYTES: i64 = 32 * 1024 * 1024;
@@ -88,6 +91,8 @@ impl Client {
         allow_cleartext: bool,
     ) -> Result<Self> {
         validate_address(address, allow_cleartext)?;
+        #[cfg(target_os = "android")]
+        diagnostics::log_connection("join", address)?;
         let invite = parse_invitation(invitation)?;
         let connector = tls_connector(certificates)?;
         let transport =
@@ -112,6 +117,8 @@ impl Client {
         allow_cleartext: bool,
     ) -> Result<Self> {
         validate_address(address, allow_cleartext)?;
+        #[cfg(target_os = "android")]
+        diagnostics::log_connection("restore", address)?;
         if !connection.user_info.is_object() {
             bail!("Invalid saved connection: user_info must be an object");
         }

@@ -11,6 +11,7 @@ import android.os.Build
 import android.graphics.BitmapFactory
 import android.util.AtomicFile
 import android.util.Base64
+import android.util.Log
 import android.view.View
 import android.view.WindowManager
 import android.widget.*
@@ -407,6 +408,17 @@ class MainActivity : Activity() {
     }
 
     private fun showError(error: Exception) {
+        Log.e("SpacesAndroid", "Android operation failed:")
+        // Log's Throwable overload omits UnknownHostException and can truncate long traces.
+        error.stackTraceToString().lineSequence().forEach { line ->
+            var start = 0
+            do {
+                var end = minOf(start + 1000, line.length)
+                if (end < line.length && line[end - 1].isHighSurrogate()) end--
+                Log.e("SpacesAndroid", line.substring(start, end))
+                start = end
+            } while (start < line.length)
+        }
         status.text = getString(R.string.error, error.message ?: error.javaClass.simpleName)
     }
 

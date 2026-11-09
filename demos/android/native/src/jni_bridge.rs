@@ -1,4 +1,4 @@
-use crate::{Client, Connection};
+use crate::{diagnostics, Client, Connection};
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use jni::{
@@ -113,18 +113,24 @@ pub extern "system" fn Java_org_encryptedspaces_android_NativeBridge_request(
     _class: JClass,
     request: JString,
 ) -> jstring {
+    diagnostics::initialize();
     let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Value> {
         let request: String = env.get_string(&request)?.into();
         execute(serde_json::from_str(&request)?)
     }));
     let envelope = match response {
         Ok(Ok(data)) => json!({"ok": true, "data": data}),
-        Ok(Err(error)) => json!({"ok": false, "error": format!("{error:#}")}),
+        Ok(Err(error)) => {
+            diagnostics::log_failure("SDK request failed", &error);
+            json!({"ok": false, "error": format!("{error:#}")})
+        }
         Err(_) => json!({"ok": false, "error": "SDK panicked; restart the app before retrying"}),
     };
     match env.new_string(envelope.to_string()) {
         Ok(value) => value.into_raw(),
         Err(error) => {
+            let error = anyhow::Error::new(error);
+            diagnostics::log_failure("JNI response failed", &error);
             let _ = env.throw_new(
                 "java/lang/IllegalStateException",
                 format!("JNI response failed: {error}"),

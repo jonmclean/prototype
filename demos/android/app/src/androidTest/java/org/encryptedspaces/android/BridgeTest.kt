@@ -1,6 +1,9 @@
 package org.encryptedspaces.android
 
+import android.os.ParcelFileDescriptor
+import android.os.Process
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -21,6 +24,34 @@ class BridgeTest {
             "not JSON"))
         assertFalse(response.getBoolean("ok"))
         assertTrue(response.getString("error").isNotBlank())
+    }
+
+    @Test fun nativeFailureLogsItsCauseAndRustBacktrace() {
+        val invitation = "invalid_invitation_${System.nanoTime()}"
+        val response = JSONObject(NativeBridge.request(
+            JSONObject().put("command", "join")
+                .put("address", "wss://example.test/ws")
+                .put("certificates", org.json.JSONArray())
+                .put("invitation", invitation).toString()))
+        assertFalse(response.getBoolean("ok"))
+        val output = InstrumentationRegistry.getInstrumentation().uiAutomation
+            .executeShellCommand("logcat -d -t 2000 --pid=${Process.myPid()} -s SpacesNative:I '*:S'")
+        val logs = ParcelFileDescriptor.AutoCloseInputStream(output).bufferedReader().use {
+            it.readText()
+        }
+        val failure = logs.substringAfterLast("SDK request failed:")
+        assertTrue(logs.contains("WebSocket join attempt: endpoint=\"wss://example.test/ws\""))
+        assertTrue(logs.contains("host=Some(\"example.test\"), port=Some(443)"))
+        assertTrue(failure.contains("Invalid invitation file"))
+        assertTrue(failure.contains("Caused by:"))
+        assertTrue(failure.contains(invitation))
+        assertTrue(failure.contains("invalid type"))
+        assertTrue(failure.contains("Stack backtrace:"))
+        assertTrue(Regex("0x[0-9a-f]+").containsMatchIn(failure))
+        assertTrue(Regex("spaces_android(?:\\[[0-9a-f]+\\])?::parse_invitation")
+            .containsMatchIn(failure))
+        assertTrue(Regex("native/src/lib\\.rs:\\d+").containsMatchIn(failure))
+        assertFalse(failure.contains("Error backtrace unavailable"))
     }
 
     @Test fun disconnectIsIdempotent() {

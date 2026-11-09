@@ -62,6 +62,8 @@ rustup target add "$target"
 cargo build --locked -p encrypted-spaces-android --target "$target" "${cargo_flags[@]}"
 mkdir -p "app/src/$mode/jniLibs/$abi"
 cp "$CARGO_TARGET_DIR/$target/$profile/libspaces_android.so" "app/src/$mode/jniLibs/$abi/"
-"$toolchain/llvm-strip" --strip-debug "app/src/$mode/jniLibs/$abi/libspaces_android.so"
+if [[ "$mode" == release ]]; then
+    "$toolchain/llvm-strip" --strip-debug "app/src/$mode/jniLibs/$abi/libspaces_android.so"
+fi
 export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$PWD/.tools/gradle-home}"
 ./gradlew --no-daemon --console=plain "-PspacesAbi=$abi" "$task"

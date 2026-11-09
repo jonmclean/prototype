@@ -147,6 +147,41 @@ cargo run -p encrypted-spaces-backend-server -- \
   --schema demos/tauri/app_schema.kdl
 ```
 
+## Error diagnostics
+
+All exceptions handled by the Kotlin UI are logged at error priority under the
+`SpacesAndroid` tag, including their stack traces, causes, and suppressed exceptions.
+This covers startup state loading, document/certificate imports, worker operations,
+and file previews. Long messages are split to avoid Logcat truncation, and DNS
+exceptions are included. Uncaught Java/Kotlin exceptions retain Android's standard
+`AndroidRuntime` crash logging. Native failures also appear in the UI log when their
+JNI error response is handled; the original Rust trace remains under `SpacesNative`.
+
+SDK/JNI failures are logged at error priority under the `SpacesNative` tag,
+including the complete error cause chain and Rust backtrace. Backtrace capture
+is enabled before the native library is loaded. Panics are logged before stack
+unwinding, with their message, source location, and stack. Long diagnostics are
+split across log entries to avoid Logcat's per-entry truncation. The UI error
+message and JNI response format are unchanged.
+
+Join and reconnect attempts log the configured WebSocket endpoint (scheme,
+host, effective port, and path) at info priority under the same tag. Credentials,
+query parameters, and fragments are excluded. This is the configured destination,
+not the DNS-resolved IP address.
+
+```bash
+adb logcat 'SpacesNative:I' 'SpacesAndroid:E' 'AndroidRuntime:E' '*:S'
+```
+
+Rebuild and reinstall the APK after changing native code or packaging settings.
+Debug APKs retain native DWARF symbols and extract the library during installation
+so Rust can resolve function names and source file/line locations directly in
+Logcat. These debug APKs and their installed libraries are substantially larger.
+Release APKs remain stripped, so their traces may contain addresses rather than
+source lines. Logs may include sensitive details from underlying errors; review them
+before sharing. Request bodies, invitations, and decrypted files are not
+explicitly logged.
+
 ## Checks
 
 ```bash

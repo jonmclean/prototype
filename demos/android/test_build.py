@@ -10,7 +10,8 @@ class JavaDetectionTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="android build ")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name) / "project/android"
+        self.root.mkdir(parents=True)
         self.script = self.root / "build.sh"
         shutil.copyfile(Path(__file__).with_name("build.sh"), self.script)
         self.bin = self.root / "bin"
@@ -38,14 +39,14 @@ class JavaDetectionTest(unittest.TestCase):
         self.executable(home / "bin/java", "exit 0")
         return home
 
-    def run_build(self, home=None):
+    def run_build(self, home=None, mode="debug"):
         environment = dict(os.environ)
         environment.pop("JAVA_HOME", None)
         environment.update(PATH=str(self.bin), ANDROID_NDK_HOME=str(self.ndk))
         if home is not None:
             environment["JAVA_HOME"] = str(home)
         return subprocess.run(
-            ["/bin/bash", str(self.script), "debug", "x86_64"],
+            ["/bin/bash", str(self.script), mode, "x86_64"],
             env=environment,
             capture_output=True,
             text=True,
@@ -111,6 +112,42 @@ class JavaDetectionTest(unittest.TestCase):
         result = self.run_build(self.jdk("unknown-jdk", "unknown"))
         self.assertEqual(1, result.returncode)
         self.assertIn("JDK 17 or newer is required", result.stderr)
+
+    def prepare_native_build(self):
+        for command in ("mkdir", "cp"):
+            (self.bin / command).symlink_to(shutil.which(command))
+        self.executable(self.bin / "rustup", "exit 0")
+        self.executable(
+            self.bin / "cargo",
+            'profile=debug\n'
+            'for arg in "$@"; do\n'
+            '  if [[ "$arg" == --release ]]; then profile=release; fi\n'
+            'done\n'
+            'output="$CARGO_TARGET_DIR/x86_64-linux-android/$profile"\n'
+            'mkdir -p "$output"\n'
+            'printf "native symbols\\n" > "$output/libspaces_android.so"',
+        )
+        self.executable(
+            self.ndk / "toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip",
+            'echo "STRIP_NATIVE_SYMBOLS"',
+        )
+        self.executable(self.root / "gradlew", "exit 0")
+
+    def test_debug_build_preserves_native_symbols(self):
+        self.prepare_native_build()
+        result = self.run_build(self.jdk("jdk25"))
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertNotIn("STRIP_NATIVE_SYMBOLS", result.stdout)
+        self.assertEqual(
+            "native symbols\n",
+            (self.root / "app/src/debug/jniLibs/x86_64/libspaces_android.so").read_text(),
+        )
+
+    def test_release_build_still_strips_native_symbols(self):
+        self.prepare_native_build()
+        result = self.run_build(self.jdk("jdk25"), mode="release")
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("STRIP_NATIVE_SYMBOLS", result.stdout)
 
 
 if __name__ == "__main__":

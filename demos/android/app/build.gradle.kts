@@ -34,6 +34,14 @@ android {
     }
 }
 
+androidComponents {
+    onVariants(selector().withBuildType("debug")) { variant ->
+        variant.packaging.jniLibs.keepDebugSymbols.add("**/libspaces_android.so")
+        // Rust's symbolizer needs an ELF file it can open, not an APK entry.
+        variant.packaging.jniLibs.useLegacyPackaging.set(true)
+    }
+}
+
 dependencies {
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
