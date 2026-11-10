@@ -1,6 +1,19 @@
 <resources>
     <string name="app_name">Spaces Files</string>
-    <string name="title">Encrypted Spaces Files</string>
+    <string name="files_title">Files</string>
+    <string name="space_brand">Encrypted Spaces</string>
+    <string name="connection">Connection</string>
+    <string name="all_files">All files</string>
+    <string name="folder_type">Folder</string>
+    <string name="text_type">Text document</string>
+    <string name="markdown_type">Markdown document</string>
+    <string name="image_type">Image</string>
+    <string name="file_type">File</string>
+    <string name="file_details">%1$s · %2$s</string>
+    <string name="browse_hint">Connect to a space to browse your files.</string>
+    <string name="view_source">View source</string>
+    <string name="view_rendered">Rendered</string>
+    <string name="close_preview">Close</string>
     <string name="warning">Research demo. Import trusted invitations only. File contents stay in memory and are never saved locally.</string>
     <string name="endpoint_hint">wss://storage.example.org/ws</string>
     <string name="import_invitation">Import invitation</string>
@@ -18,8 +31,8 @@
     <string name="internet_only">Continue internet-only</string>
     <string name="empty">This folder is empty.</string>
     <plurals name="file_count">
-        <item quantity="one">%1$d entry. Tap a folder to browse or a file to read.</item>
-        <item quantity="other">%1$d entries. Tap a folder to browse or a file to read.</item>
+        <item quantity="one">%1$d item</item>
+        <item quantity="other">%1$d items</item>
     </plurals>
     <string name="preview">Preview only. Nothing saved to this device.</string>
     <string name="text_truncated">Preview limited to the first 256 KiB.</string>
@@ -27,6 +40,4 @@
     <string name="invalid_image">This image could not be decoded.</string>
     <string name="cert_added">Certificate added for this session. Reconnect to apply it.</string>
     <string name="error">Error: %1$s</string>
-    <string name="folder">Folder: %1$s</string>
-    <string name="file">%1$s (%2$d B)</string>
 </resources>

@@ -85,11 +85,21 @@ Rust output is isolated in the repository's `target/android`.
 1. Open Spaces Files. Enter the server endpoint, for example
    `wss://storage.example.org:8443/ws`, and tap **Import invitation**. The server
    address is required; the SDK invitation does not contain an endpoint.
-1. Tap folders to browse; **Up** returns to the parent and **Refresh** synchronizes
-   with the server. Tap a file to read it. Text/JSON/XML and images have simple
-   previews. Other file types are read in memory and show a byte-count message.
+1. Browse the file explorer's folder-first list, with file icons, types, and sizes.
+   Tap a folder to open it, use the breadcrumb to jump to an ancestor, or tap **Up**
+   to return to the parent. **Refresh** synchronizes with the server.
+1. Tap a file for a full-screen, read-only preview. Text/JSON/XML files use a
+   monospace reader. Markdown (`.md`, `.markdown`, `.mdown`, or Markdown MIME type)
+   is rendered with headings, lists, emphasis, and code blocks; **View source**
+   switches to the original text. Filename detection also recognizes text files
+   when their MIME type is missing or generic. Images have a downsampled preview.
+   Other file types show a byte-count message. Links are not interactive and
+   remote images are not fetched.
 1. **Reconnect** restores the privately saved connection after restarting the app.
    **Forget space** removes that connection state.
+
+Connection settings collapse after joining so the file list has more room.
+Tap **Connection** to reopen the server, invitation, certificate, and reconnect controls.
 
 The phone joins as the **invited member**, not as the desktop member. The SDK
 rotates the invitation's provisional keys to fresh permanent keys during join,
