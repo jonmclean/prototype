@@ -32,6 +32,9 @@ enum Request {
     Read {
         id: i64,
     },
+    SetUserName {
+        user_name: String,
+    },
     Snapshot,
     Disconnect,
 }
@@ -87,7 +90,7 @@ fn execute(request: Request) -> Result<Value> {
                     Ok(Value::Null)
                 }
                 request => {
-                    let client = client.as_ref().context("Connect to a space first")?;
+                    let client = client.as_mut().context("Connect to a space first")?;
                     match request {
                         Request::List { parent_id } => {
                             Ok(serde_json::to_value(client.list(parent_id).await?)?)
@@ -97,6 +100,10 @@ fn execute(request: Request) -> Result<Value> {
                             Ok(json!({"base64": STANDARD.encode(bytes)}))
                         }
                         Request::Snapshot => Ok(serde_json::to_value(client.snapshot().await?)?),
+                        Request::SetUserName { user_name } => {
+                            client.set_user_name(&user_name).await?;
+                            Ok(serde_json::to_value(client.snapshot().await?)?)
+                        }
                         _ => unreachable!(),
                     }
                 }

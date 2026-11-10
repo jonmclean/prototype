@@ -38,6 +38,12 @@ pub struct Client {
     connection: Connection,
 }
 
+#[derive(Deserialize, Serialize)]
+struct UserMetadata {
+    id: i64,
+    name: String,
+}
+
 pub fn validate_address(address: &str, allow_cleartext: bool) -> Result<()> {
     let url = url::Url::parse(address).context("Invalid WebSocket address")?;
     if url.scheme() != "wss" && !(allow_cleartext && url.scheme() == "ws") {
@@ -166,6 +172,54 @@ impl Client {
                 .then_with(|| a.id.cmp(&b.id))
         });
         Ok(rows)
+    }
+
+    pub async fn set_user_name(&mut self, user_name: &str) -> Result<()> {
+        let name = user_name.trim();
+        if name.is_empty() {
+            bail!("Enter a user name");
+        }
+        let id = i64::from(self.space.uid().context("Missing connected user id")?);
+        self.space
+            .sync()
+            .await
+            .context("Cannot sync space before setting user name")?;
+        let existing: Option<UserMetadata> = self
+            .space
+            .table("users_meta")
+            .select()
+            .where_eq("id", id)
+            .first()
+            .await
+            .context("Cannot read member display name")?;
+        if let Some(existing) = existing {
+            if existing.name != name {
+                let updated = self
+                    .space
+                    .table::<UserMetadata>("users_meta")
+                    .update()
+                    .set("name", name)
+                    .where_eq("id", id)
+                    .execute()
+                    .await
+                    .context("Cannot update member display name")?;
+                if updated != 1 {
+                    bail!("Member display name was not updated");
+                }
+            }
+        } else {
+            self.space
+                .table("users_meta")
+                .insert(&UserMetadata {
+                    id,
+                    name: name.into(),
+                })
+                .execute()
+                .await
+                .context("Cannot create member display name")?;
+        }
+        self.connection.user_info["user_name"] = name.into();
+        Ok(())
     }
 
     async fn inode(&self, id: i64) -> Result<Inode> {
@@ -303,5 +357,47 @@ mod tests {
         let mut disguised_snapshot = invite;
         disguised_snapshot["space_snapshot"] = serde_json::json!({});
         assert!(parse_invitation(disguised_snapshot).is_err());
+    }
+
+    #[tokio::test]
+    async fn user_name_is_published_for_the_connected_member_and_saved() {
+        let transport = encrypted_spaces_sdk::local_transport::LocalTransport::from_schema_file(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../tauri/app_schema.kdl"),
+        )
+        .await
+        .unwrap();
+        let space = Space::create(transport, sdk_codegen::application_schema())
+            .await
+            .unwrap();
+        let id = i64::from(space.uid().unwrap());
+        let mut client = Client {
+            connection: Connection {
+                user_info: serde_json::json!({"user_id": id}),
+                space_snapshot: space.snapshot().await.unwrap(),
+            },
+            space,
+        };
+        assert!(client.set_user_name(" \n ").await.is_err());
+        for name in ["  My phone  ", "My phone", "New name"] {
+            client.set_user_name(name).await.unwrap();
+            let rows: Vec<UserMetadata> = client
+                .space
+                .table("users_meta")
+                .select()
+                .all()
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, id);
+            assert_eq!(rows[0].name, name.trim());
+            let snapshot = client.snapshot().await.unwrap();
+            assert_eq!(snapshot.user_info["user_name"], name.trim());
+            assert_eq!(snapshot.user_info["user_id"], id);
+        }
+        assert!(client.set_user_name("").await.is_err());
+        assert_eq!(
+            client.snapshot().await.unwrap().user_info["user_name"],
+            "New name"
+        );
     }
 }

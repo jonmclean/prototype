@@ -3,6 +3,11 @@
     <string name="files_title">Files</string>
     <string name="space_brand">Encrypted Spaces</string>
     <string name="connection">Connection</string>
+    <string name="connect_as">Connect to space as</string>
+    <string name="connect">Connect</string>
+    <string name="user_name">User name</string>
+    <string name="user_name_explanation">Choose the display name other members will see. Your invitation determines your account.</string>
+    <string name="user_name_required">Enter a user name.</string>
     <string name="all_files">All files</string>
     <string name="folder_type">Folder</string>
     <string name="text_type">Text document</string>

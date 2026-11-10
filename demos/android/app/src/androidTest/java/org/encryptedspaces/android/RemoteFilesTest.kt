@@ -2,6 +2,7 @@ package org.encryptedspaces.android
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -10,6 +11,8 @@ import android.util.Base64
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
+import android.view.View
+import android.view.ViewGroup
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.json.JSONArray
@@ -47,6 +50,18 @@ class RemoteFilesTest {
         fun importDocument(code: Int, path: String) {
             documentResult.invoke(activity, code, Activity.RESULT_OK,
                 Intent().setData(Uri.fromFile(File(path))))
+        }
+        fun confirmUserName() {
+            val dialog = field("userNameDialog") as AlertDialog
+            fun input(view: View): EditText? = when (view) {
+                is EditText -> view
+                is ViewGroup -> (0 until view.childCount).firstNotNullOfOrNull {
+                    input(view.getChildAt(it))
+                }
+                else -> null
+            }
+            checkNotNull(input(dialog.window!!.decorView)).setText("Android integration test")
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
         }
         fun awaitConnection() {
             val deadline = SystemClock.elapsedRealtime() + 65_000
@@ -87,11 +102,14 @@ class RemoteFilesTest {
             }
             instrumentation.runOnMainSync {
                 importDocument(1, checkNotNull(invitationPath))
+                confirmUserName()
             }
             awaitConnection()
             val saved = File(context.noBackupFilesDir, "invited-connection.json")
             assertTrue(saved.isFile)
             val connection = JSONObject(saved.readText())
+            assertEquals("Android integration test",
+                connection.getJSONObject("user_info").getString("user_name"))
             assertEquals(
                 invitation.getJSONObject("user").getLong("id"),
                 connection.getJSONObject("user_info").getLong("user_id")
@@ -109,7 +127,10 @@ class RemoteFilesTest {
             val bytes = Base64.decode(read.getString("base64"), Base64.DEFAULT)
             assertEquals("Android in-memory read: hello encrypted spaces!\n", bytes.toString(Charsets.UTF_8))
             bytes.fill(0)
-            instrumentation.runOnMainSync { (field("reconnect") as Button).performClick() }
+            instrumentation.runOnMainSync {
+                (field("reconnect") as Button).performClick()
+                confirmUserName()
+            }
             awaitConnection()
             val restored = request(JSONObject().put("command", "list").put("parent_id", folder)) as JSONArray
             assertEquals(1, restored.length())

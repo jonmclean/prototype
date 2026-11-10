@@ -26,6 +26,14 @@ class BridgeTest {
         assertTrue(response.getString("error").isNotBlank())
     }
 
+    @Test fun userNameCannotBeSetWithoutAConnectedMember() {
+        NativeBridge.request("""{"command":"disconnect"}""")
+        val response = JSONObject(NativeBridge.request(
+            """{"command":"set_user_name","user_name":"My phone"}"""))
+        assertFalse(response.getBoolean("ok"))
+        assertTrue(response.getString("error").contains("Connect to a space first"))
+    }
+
     @Test fun nativeFailureLogsItsCauseAndRustBacktrace() {
         val invitation = "invalid_invitation_${System.nanoTime()}"
         val response = JSONObject(NativeBridge.request(

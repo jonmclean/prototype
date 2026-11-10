@@ -85,6 +85,10 @@ Rust output is isolated in the repository's `target/android`.
 1. Open Spaces Files. Enter the server endpoint, for example
    `wss://storage.example.org:8443/ws`, and tap **Import invitation**. The server
    address is required; the SDK invitation does not contain an endpoint.
+1. After selecting the invitation, confirm the **Connect to space as** dialog.
+   The user name defaults to the phone's configured device name (or its model
+   if no name is configured). Edit it to choose the display name other members
+   will see. Empty names are not accepted; cancelling does not start a connection.
 1. Browse the file explorer's folder-first list, with file icons, types, and sizes.
    Tap a folder to open it, use the breadcrumb to jump to an ancestor, or tap **Up**
    to return to the parent. **Refresh** synchronizes with the server.
@@ -96,6 +100,7 @@ Rust output is isolated in the repository's `target/android`.
    Other file types show a byte-count message. Links are not interactive and
    remote images are not fetched.
 1. **Reconnect** restores the privately saved connection after restarting the app.
+   It also prompts for a name, allowing the existing member's display name to change.
    **Forget space** removes that connection state.
 
 Connection settings collapse after joining so the file list has more room.
@@ -112,8 +117,12 @@ file from public/shared storage after joining. Use a fresh invitation after
 only this app's privately saved `invited-connection.json` in no-backup storage.
 Legacy `connection.json` files from the snapshot-import version are not restored;
 join again with a fresh invitation. The SDK's transient table cache is not
-serialized. Android does not write user profiles/channels or modify files;
-joining does update the invited member's authentication/key state on the server.
+serialized. Android publishes the chosen display name to the connected member's
+`users_meta` row, but does not create channels or modify files. The invitation
+still determines the member identity; entering a name does not select another
+account. Joining updates the invited member's authentication/key state on the
+server. New credentials are saved before publishing the name, so a failed name
+update can be retried with **Reconnect** without reusing a consumed invitation.
 
 ### No decrypted files on disk
 

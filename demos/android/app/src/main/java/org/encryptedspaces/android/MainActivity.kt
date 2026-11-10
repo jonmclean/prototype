@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.Build
+import android.provider.Settings
 import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.text.format.Formatter
@@ -51,6 +52,7 @@ class MainActivity : Activity() {
     private var extraCertificates = emptyList<String>()
     private var previewDialog: AlertDialog? = null
     private var networkPermissionDialog: AlertDialog? = null
+    private var userNameDialog: AlertDialog? = null
     private var pendingNetworkAction: (() -> Unit)? = null
     private val snapshotFile get() = AtomicFile(File(noBackupFilesDir, "invited-connection.json"))
     private val markdown by lazy { Markwon.create(this) }
@@ -123,9 +125,11 @@ class MainActivity : Activity() {
         }
         reconnect = button(connectionRow, R.string.restore) {
             val endpoint = address.text.toString().trim()
-            networkOperation {
-                val connection = JSONObject(snapshotFile.openRead().use { it.reader().readText() })
-                restore(connection, endpoint)
+            promptUserName { userName ->
+                networkOperation {
+                    val connection = JSONObject(snapshotFile.openRead().use { it.reader().readText() })
+                    restore(connection, endpoint, userName)
+                }
             }
         }
         val trustRow = row()
@@ -246,13 +250,15 @@ class MainActivity : Activity() {
         when (requestCode) {
             IMPORT_INVITATION -> {
                 val endpoint = address.text.toString().trim()
-                networkOperation {
-                    val invitation = JSONObject(
-                        readDocument(uri, 1024 * 1024).toString(Charsets.UTF_8)
-                    )
-                    establishConnection(JSONObject()
-                        .put("command", "join")
-                        .put("invitation", invitation), endpoint)
+                promptUserName { userName ->
+                    networkOperation {
+                        val invitation = JSONObject(
+                            readDocument(uri, 1024 * 1024).toString(Charsets.UTF_8)
+                        )
+                        establishConnection(JSONObject()
+                            .put("command", "join")
+                            .put("invitation", invitation), endpoint, userName)
+                    }
                 }
             }
             IMPORT_CERTIFICATE -> operation {
@@ -283,16 +289,61 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun restore(connection: JSONObject, overrideAddress: String) {
+    private fun promptUserName(action: (String) -> Unit) {
+        if (busy || pendingNetworkAction != null || userNameDialog != null) return
+        val name = EditText(this).apply {
+            hint = getString(R.string.user_name)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_PERSON_NAME
+            isSingleLine = true
+            setText(Settings.Global.getString(contentResolver, "device_name")
+                ?.trim()?.takeIf { it.isNotEmpty() } ?: Build.MODEL)
+            selectAll()
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), 0)
+            addView(TextView(this@MainActivity).apply { setText(R.string.user_name_explanation) })
+            addView(name)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(R.string.connect_as)
+            .setView(content)
+            .setPositiveButton(R.string.connect, null)
+            .setNegativeButton(android.R.string.cancel, null)
+            .create()
+        userNameDialog = dialog
+        dialog.setOnDismissListener {
+            if (userNameDialog === dialog) userNameDialog = null
+            updateControls()
+        }
+        dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        dialog.show()
+        dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val userName = name.text.toString().trim()
+            if (userName.isEmpty()) {
+                name.error = getString(R.string.user_name_required)
+            } else {
+                userNameDialog = null
+                dialog.dismiss()
+                updateControls()
+                action(userName)
+            }
+        }
+        updateControls()
+    }
+
+    private fun restore(connection: JSONObject, overrideAddress: String, userName: String) {
         val endpoint = overrideAddress.ifEmpty {
             connection.getJSONObject("user_info").getString("ws_address")
         }
         establishConnection(JSONObject()
             .put("command", "restore")
-            .put("connection", connection), endpoint)
+            .put("connection", connection), endpoint, userName)
     }
 
-    private fun establishConnection(request: JSONObject, endpoint: String) {
+    private fun establishConnection(request: JSONObject, endpoint: String, userName: String) {
         require(endpoint.isNotBlank()) { getString(R.string.endpoint_required) }
         runOnUiThread {
             connected = false
@@ -308,7 +359,10 @@ class MainActivity : Activity() {
         val snapshot = native(request
             .put("address", endpoint)
             .put("certificates", certificates)) as JSONObject
+        // Persist rotated invitation credentials before a profile update can fail.
         saveSnapshot(snapshot)
+        saveSnapshot(native(JSONObject().put("command", "set_user_name")
+            .put("user_name", userName)) as JSONObject)
         runOnUiThread {
             address.setText(endpoint)
             connected = true
@@ -613,7 +667,7 @@ class MainActivity : Activity() {
     }
 
     private fun updateControls() {
-        val available = !busy && pendingNetworkAction == null
+        val available = !busy && pendingNetworkAction == null && userNameDialog == null
         progress.visibility = if (busy) View.VISIBLE else View.INVISIBLE
         controls.forEach { it.isEnabled = available }
         for (index in 0 until breadcrumb.childCount) {
@@ -629,6 +683,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         pendingNetworkAction = null
         networkPermissionDialog?.dismiss()
+        userNameDialog?.dismiss()
         previewDialog?.dismiss()
         worker.shutdown()
         super.onDestroy()
