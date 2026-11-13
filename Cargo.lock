@@ -2180,6 +2180,7 @@ dependencies = [
  "base64 0.22.1",
  "encrypted-spaces-ffproof",
  "encrypted-spaces-sdk",
+ "encrypted-spaces-sdk-codegen",
  "jni",
  "native-tls",
  "serde",

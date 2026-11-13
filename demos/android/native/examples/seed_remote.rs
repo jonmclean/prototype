@@ -5,8 +5,7 @@ use encrypted_spaces_ffproof::EXTEND_FF_ID;
 use encrypted_spaces_sdk::{
     local_transport::LocalTransport, ApplicationSchema, File, QueryParam, Space, WebSocketTransport,
 };
-use serde_json::json;
-use spaces_android::{Client, Connection};
+use spaces_android::Client;
 use std::time::Duration;
 
 const CONTENT: &[u8] = b"Android in-memory read: hello encrypted spaces!\n";
@@ -38,7 +37,7 @@ async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     anyhow::ensure!(
         args.len() == 3 || args.len() == 4,
-        "Usage: seed_remote ENDPOINT SNAPSHOT_OUTPUT [TRUST_CERT]"
+        "Usage: seed_remote ENDPOINT INVITATION_OUTPUT [TRUST_CERT]"
     );
     let (connector, certificates) = if args.len() == 4 {
         use base64::Engine;
@@ -64,15 +63,17 @@ async fn main() -> Result<()> {
         let uploaded = space.file().upload(File::from_data(CONTENT.to_vec())).await?;
         let root_file = add_inode(&space, 0, "hello.txt", 1, uploaded.clone()).await?;
         let nested_file = add_inode(&space, folder, "nested.txt", 1, uploaded).await?;
-        let connection = Connection {
-            user_info: json!({
-                "user_id": space.uid(), "user_name": "Android fixture",
-                "ws_address": args[1], "current_channel_id": 0, "current_channel_name": ""
-            }),
-            space_snapshot: space.snapshot().await?,
-        };
-        std::fs::write(&args[2], serde_json::to_vec_pretty(&connection)?)?;
-        let client = Client::connect(connection, &args[1], &certificates, true).await?;
+        let invite = space.invite_user().await?;
+        let invite_json = serde_json::to_value(&invite)?;
+        let client = Client::join(invite_json.clone(), &args[1], &certificates, true).await?;
+        anyhow::ensure!(
+            client.snapshot().await?.user_info["user_id"] != serde_json::json!(space.uid()),
+            "Invitation reused the owner's identity"
+        );
+        anyhow::ensure!(
+            Client::join(invite_json, &args[1], &certificates, true).await.is_err(),
+            "Consumed invitation was reusable"
+        );
         let root = client.list(0).await?;
         anyhow::ensure!(root.len() == 2 && root[0].inode_type == 2, "Root listing mismatch");
         let nested = client.list(folder).await?;
@@ -83,9 +84,11 @@ async fn main() -> Result<()> {
         let snapshot = client.snapshot().await?;
         anyhow::ensure!(!serde_json::to_string(&snapshot)?.contains(std::str::from_utf8(CONTENT)?),
             "Snapshot unexpectedly contains plaintext file contents");
-        let restored = Client::connect(snapshot, &args[1], &certificates, true).await?;
+        let restored = Client::restore(snapshot, &args[1], &certificates, true).await?;
         anyhow::ensure!(restored.read(root_file).await? == CONTENT, "Restored read mismatch");
-        println!("Protocol checks passed: root/nested listing, in-memory reads, folder rejection, restore.");
+        let phone_invite = space.invite_user().await?;
+        std::fs::write(&args[2], serde_json::to_vec_pretty(&phone_invite)?)?;
+        println!("Protocol checks passed: invitation join/reuse rejection, root/nested listing, in-memory reads, folder rejection, restore.");
         println!("Fixture folder={folder} root_file={root_file} nested_file={nested_file}");
         Ok::<_, anyhow::Error>(())
     }).await.context("Fixture operation timed out")??;

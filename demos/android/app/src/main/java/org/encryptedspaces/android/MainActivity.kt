@@ -1,16 +1,27 @@
 package org.encryptedspaces.android
 
+import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
+import android.os.Build
+import android.provider.Settings
 import android.graphics.BitmapFactory
+import android.graphics.Typeface
+import android.text.format.Formatter
 import android.util.AtomicFile
 import android.util.Base64
+import android.util.Log
 import android.view.View
+import android.view.ViewGroup
+import android.view.Gravity
 import android.view.WindowManager
 import android.widget.*
+import io.noties.markwon.Markwon
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -18,11 +29,15 @@ import java.io.ByteArrayOutputStream
 import java.security.KeyStore
 import java.security.cert.CertificateFactory
 import java.util.concurrent.Executors
+import java.util.Locale
 
 class MainActivity : Activity() {
     private lateinit var address: EditText
     private lateinit var status: TextView
-    private lateinit var breadcrumb: TextView
+    private lateinit var breadcrumb: LinearLayout
+    private lateinit var connectionPanel: LinearLayout
+    private lateinit var emptyState: TextView
+    private lateinit var progress: ProgressBar
     private lateinit var list: ListView
     private lateinit var reconnect: Button
     private lateinit var refresh: Button
@@ -36,22 +51,52 @@ class MainActivity : Activity() {
     private var busy = false
     private var extraCertificates = emptyList<String>()
     private var previewDialog: AlertDialog? = null
-    private val snapshotFile get() = AtomicFile(File(noBackupFilesDir, "connection.json"))
+    private var networkPermissionDialog: AlertDialog? = null
+    private var userNameDialog: AlertDialog? = null
+    private var pendingNetworkAction: (() -> Unit)? = null
+    private val snapshotFile get() = AtomicFile(File(noBackupFilesDir, "invited-connection.json"))
+    private val markdown by lazy { Markwon.create(this) }
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            val inset = (16 * resources.displayMetrics.density).toInt()
+            val inset = dp(12)
             setPadding(inset, inset, inset, inset)
-            fitsSystemWindows = true
         }
-        root.addView(TextView(this).apply {
-            setText(R.string.title)
-            textSize = 22f
+        val titleRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        root.addView(titleRow)
+        titleRow.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(TextView(this@MainActivity).apply {
+                setText(R.string.files_title)
+                textSize = 28f
+                setTypeface(typeface, Typeface.BOLD)
+            })
+            addView(TextView(this@MainActivity).apply {
+                setText(R.string.space_brand)
+                textSize = 12f
+            })
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        titleRow.addView(Button(this).apply {
+            setText(R.string.connection)
+            isAllCaps = false
+            setOnClickListener {
+                connectionPanel.visibility =
+                    if (connectionPanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+            }
         })
-        root.addView(TextView(this).apply { setText(R.string.warning) })
+        connectionPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(4), dp(8), dp(4), dp(8))
+        }
+        root.addView(connectionPanel)
+        connectionPanel.addView(TextView(this).apply {
+            setText(R.string.warning)
+            textSize = 12f
+        })
         address = EditText(this).apply {
             setHint(R.string.endpoint_hint)
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
@@ -59,22 +104,32 @@ class MainActivity : Activity() {
             isSingleLine = true
         }
         controls.add(address)
-        root.addView(address)
-        fun row(): LinearLayout = LinearLayout(this).also { root.addView(it) }
+        connectionPanel.addView(address)
+        fun row(parent: LinearLayout = connectionPanel): LinearLayout =
+            LinearLayout(this).also { parent.addView(it) }
         fun button(row: LinearLayout, text: Int, action: () -> Unit): Button =
             Button(this).apply {
                 setText(text)
+                isAllCaps = false
                 setOnClickListener { action() }
                 controls.add(this)
                 row.addView(this, LinearLayout.LayoutParams(0, -2, 1f))
             }
         val connectionRow = row()
-        button(connectionRow, R.string.import_snapshot) { openDocument(IMPORT_SNAPSHOT) }
+        button(connectionRow, R.string.import_invitation) {
+            if (address.text.toString().isBlank()) {
+                showError(IllegalArgumentException(getString(R.string.endpoint_required)))
+            } else {
+                openDocument(IMPORT_INVITATION)
+            }
+        }
         reconnect = button(connectionRow, R.string.restore) {
             val endpoint = address.text.toString().trim()
-            operation {
-                val connection = JSONObject(snapshotFile.openRead().use { it.reader().readText() })
-                connect(connection, endpoint)
+            promptUserName { userName ->
+                networkOperation {
+                    val connection = JSONObject(snapshotFile.openRead().use { it.reader().readText() })
+                    restore(connection, endpoint, userName)
+                }
             }
         }
         val trustRow = row()
@@ -90,28 +145,40 @@ class MainActivity : Activity() {
                     folders.clear()
                     folders.add(0L to "/")
                     entries = emptyList()
+                    connectionPanel.visibility = View.VISIBLE
                     renderEntries()
                     status.setText(R.string.disconnected)
                 }
             }
         }
-        val navigationRow = row()
+        val navigationRow = row(root)
         up = button(navigationRow, R.string.up) {
-            operation { loadFolder(folders.dropLast(1)) }
+            networkOperation { loadFolder(folders.dropLast(1)) }
         }
         refresh = button(navigationRow, R.string.refresh) {
-            operation { loadFolder(folders.toList()) }
+            networkOperation { loadFolder(folders.toList()) }
         }
-        breadcrumb = TextView(this).also { root.addView(it) }
+        breadcrumb = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        root.addView(HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(breadcrumb)
+        })
+        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            isIndeterminate = true
+            visibility = View.INVISIBLE
+        }
+        root.addView(progress, LinearLayout.LayoutParams(-1, dp(4)))
         status = TextView(this).also {
             it.setText(R.string.disconnected)
-            it.setPadding(0, 8, 0, 8)
-            root.addView(it)
+            it.textSize = 12f
+            it.setPadding(dp(4), dp(8), dp(4), dp(8))
         }
         list = ListView(this).apply {
+            setBackgroundColor(android.graphics.Color.WHITE)
+            dividerHeight = dp(1)
             setOnItemClickListener { _, _, position, _ ->
                 val entry = entries[position]
-                operation {
+                networkOperation {
                     if (entry.getInt("type") == 2) {
                         loadFolder(folders + (entry.getLong("id") to entry.getString("name")))
                     } else {
@@ -121,8 +188,26 @@ class MainActivity : Activity() {
             }
         }
         controls.add(list)
-        root.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
-        setContentView(root)
+        val files = FrameLayout(this)
+        files.addView(list, FrameLayout.LayoutParams(-1, -1))
+        emptyState = TextView(this).apply {
+            gravity = Gravity.CENTER
+            textSize = 16f
+            setPadding(dp(24), dp(32), dp(24), dp(32))
+        }
+        files.addView(emptyState, FrameLayout.LayoutParams(-1, -1))
+        list.emptyView = emptyState
+        root.addView(files, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(status)
+        setContentView(FrameLayout(this).apply {
+            fitsSystemWindows = true
+            addView(root, FrameLayout.LayoutParams(-1, -1))
+        })
+        if (Build.VERSION.SDK_INT >= 33) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT
+            ) { navigateBack() }
+        }
         try {
             if (snapshotFile.baseFile.exists()) {
                 val saved = JSONObject(snapshotFile.openRead().use { it.reader().readText() })
@@ -133,6 +218,21 @@ class MainActivity : Activity() {
         }
         renderEntries()
         updateControls()
+    }
+
+    @Deprecated("Used on Android versions before the back-invoked API")
+    @SuppressLint("GestureBackNavigation") // API 33+ uses the platform callback registered in onCreate.
+    override fun onBackPressed() {
+        navigateBack()
+    }
+
+    private fun navigateBack() {
+        if (connected && folders.size > 1) {
+            val parent = folders.dropLast(1)
+            networkOperation { loadFolder(parent) }
+        } else {
+            finish()
+        }
     }
 
     private fun openDocument(code: Int) {
@@ -148,10 +248,17 @@ class MainActivity : Activity() {
         if (resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         when (requestCode) {
-            IMPORT_SNAPSHOT -> {
+            IMPORT_INVITATION -> {
                 val endpoint = address.text.toString().trim()
-                operation {
-                    connect(JSONObject(readDocument(uri, 16 * 1024 * 1024).toString(Charsets.UTF_8)), endpoint)
+                promptUserName { userName ->
+                    networkOperation {
+                        val invitation = JSONObject(
+                            readDocument(uri, 1024 * 1024).toString(Charsets.UTF_8)
+                        )
+                        establishConnection(JSONObject()
+                            .put("command", "join")
+                            .put("invitation", invitation), endpoint, userName)
+                    }
                 }
             }
             IMPORT_CERTIFICATE -> operation {
@@ -182,10 +289,62 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun connect(connection: JSONObject, overrideAddress: String) {
+    private fun promptUserName(action: (String) -> Unit) {
+        if (busy || pendingNetworkAction != null || userNameDialog != null) return
+        val name = EditText(this).apply {
+            hint = getString(R.string.user_name)
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_PERSON_NAME
+            isSingleLine = true
+            setText(Settings.Global.getString(contentResolver, "device_name")
+                ?.trim()?.takeIf { it.isNotEmpty() } ?: Build.MODEL)
+            selectAll()
+        }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(8), dp(24), 0)
+            addView(TextView(this@MainActivity).apply { setText(R.string.user_name_explanation) })
+            addView(name)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(R.string.connect_as)
+            .setView(content)
+            .setPositiveButton(R.string.connect, null)
+            .setNegativeButton(android.R.string.cancel, null)
+            .create()
+        userNameDialog = dialog
+        dialog.setOnDismissListener {
+            if (userNameDialog === dialog) userNameDialog = null
+            updateControls()
+        }
+        dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        dialog.show()
+        dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val userName = name.text.toString().trim()
+            if (userName.isEmpty()) {
+                name.error = getString(R.string.user_name_required)
+            } else {
+                userNameDialog = null
+                dialog.dismiss()
+                updateControls()
+                action(userName)
+            }
+        }
+        updateControls()
+    }
+
+    private fun restore(connection: JSONObject, overrideAddress: String, userName: String) {
         val endpoint = overrideAddress.ifEmpty {
             connection.getJSONObject("user_info").getString("ws_address")
         }
+        establishConnection(JSONObject()
+            .put("command", "restore")
+            .put("connection", connection), endpoint, userName)
+    }
+
+    private fun establishConnection(request: JSONObject, endpoint: String, userName: String) {
+        require(endpoint.isNotBlank()) { getString(R.string.endpoint_required) }
         runOnUiThread {
             connected = false
             entries = emptyList()
@@ -197,15 +356,17 @@ class MainActivity : Activity() {
             certificates.put(Base64.encodeToString(keyStore.getCertificate(alias).encoded, Base64.NO_WRAP))
         }
         extraCertificates.forEach { certificates.put(it) }
-        val snapshot = native(JSONObject()
-            .put("command", "connect")
+        val snapshot = native(request
             .put("address", endpoint)
-            .put("connection", connection)
             .put("certificates", certificates)) as JSONObject
+        // Persist rotated invitation credentials before a profile update can fail.
         saveSnapshot(snapshot)
+        saveSnapshot(native(JSONObject().put("command", "set_user_name")
+            .put("user_name", userName)) as JSONObject)
         runOnUiThread {
             address.setText(endpoint)
             connected = true
+            connectionPanel.visibility = View.GONE
         }
         loadFolder(listOf(0L to "/"))
     }
@@ -216,6 +377,9 @@ class MainActivity : Activity() {
             .put("parent_id", path.last().first)) as JSONArray
         saveSnapshot(native(JSONObject().put("command", "snapshot")) as JSONObject)
         val loaded = (0 until result.length()).map { result.getJSONObject(it) }
+            .sortedWith(compareBy<JSONObject> { it.getInt("type") != 2 }
+                .thenBy { it.getString("name").lowercase(Locale.ROOT) }
+                .thenBy { it.getString("name") })
         runOnUiThread {
             folders.clear()
             folders.addAll(path)
@@ -249,10 +413,14 @@ class MainActivity : Activity() {
 
     private fun preview(entry: JSONObject, bytes: ByteArray) {
         previewDialog?.dismiss()
-        val mime = entry.getString("mime_type")
+        val mime = mimeType(entry)
+        val isMarkdown = isMarkdown(entry)
+        var textView: TextView? = null
+        var source: String? = null
+        var sourceVisible = false
         var releaseImage: (() -> Unit)? = null
         val view: View = when {
-            mime.startsWith("image/") -> {
+            mime.startsWith("image/") && !isText(entry) -> {
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
                 require(bounds.outWidth > 0 && bounds.outHeight > 0) { getString(R.string.invalid_image) }
@@ -267,16 +435,28 @@ class MainActivity : Activity() {
                     adjustViewBounds = true
                 }
             }
-            mime.startsWith("text/") || mime in setOf("application/json", "application/xml") -> {
+            isText(entry) -> {
                 val limit = 256 * 1024
                 val text = String(bytes, 0, minOf(bytes.size, limit), Charsets.UTF_8)
                 ScrollView(this).apply {
                     addView(TextView(this@MainActivity).apply {
-                        setPadding(16, 16, 16, 16)
-                        this.text = if (bytes.size > limit)
+                        setPadding(dp(20), dp(20), dp(20), dp(20))
+                        textSize = 16f
+                        val content = if (bytes.size > limit)
                             getString(R.string.text_truncated) + "\n\n" + text else text
+                        if (isMarkdown) {
+                            source = content
+                            markdown.setMarkdown(this, content)
+                        } else {
+                            typeface = Typeface.MONOSPACE
+                            this.text = content
+                        }
+                        textView = this
                         // Disable text selection: copying would persist content to the clipboard.
                         setTextIsSelectable(false)
+                        // Previews must not navigate to external URLs or fetch remote content.
+                        movementMethod = null
+                        linksClickable = false
                     })
                 }
             }
@@ -285,21 +465,70 @@ class MainActivity : Activity() {
                 setPadding(16, 16, 16, 16)
             }
         }
-        AlertDialog.Builder(this)
+        val builder = AlertDialog.Builder(this)
             .setTitle(entry.getString("name"))
             .setView(view)
-            .setPositiveButton(android.R.string.ok, null)
-            .create().apply {
-                previewDialog = this
-                setOnDismissListener {
-                    bytes.fill(0)
-                    releaseImage?.invoke()
-                    previewDialog = null
-                }
-                window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-                show()
-                window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            .setPositiveButton(R.string.close_preview, null)
+        if (isMarkdown) builder.setNeutralButton(R.string.view_source, null)
+        builder.create().apply {
+            previewDialog = this
+            setOnDismissListener {
+                bytes.fill(0)
+                textView?.text = ""
+                source = null
+                releaseImage?.invoke()
+                if (previewDialog === this) previewDialog = null
             }
+            window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            show()
+            window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            window?.setLayout(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT
+            )
+            if (isMarkdown) getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                val reader = checkNotNull(textView)
+                val content = checkNotNull(source)
+                sourceVisible = !sourceVisible
+                if (sourceVisible) {
+                    reader.typeface = Typeface.MONOSPACE
+                    reader.text = content
+                } else {
+                    reader.typeface = Typeface.DEFAULT
+                    markdown.setMarkdown(reader, content)
+                }
+                reader.movementMethod = null
+                reader.linksClickable = false
+                getButton(AlertDialog.BUTTON_NEUTRAL).setText(
+                    if (sourceVisible) R.string.view_rendered else R.string.view_source
+                )
+            }
+        }
+    }
+
+    private fun mimeType(entry: JSONObject) =
+        entry.optString("mime_type").substringBefore(';').trim().lowercase(Locale.ROOT)
+
+    private fun extension(entry: JSONObject) =
+        entry.getString("name").substringAfterLast('.', "").lowercase(Locale.ROOT)
+
+    private fun isMarkdown(entry: JSONObject) =
+        mimeType(entry) in setOf("text/markdown", "text/x-markdown") ||
+            extension(entry) in setOf("md", "markdown", "mdown")
+
+    private fun isText(entry: JSONObject): Boolean {
+        val mime = mimeType(entry)
+        return isMarkdown(entry) || mime.startsWith("text/") ||
+            mime in setOf("application/json", "application/xml") ||
+            extension(entry) in setOf("txt", "text", "log", "csv", "json", "xml")
+    }
+
+    private fun fileType(entry: JSONObject): Int = when {
+        entry.getInt("type") == 2 -> R.string.folder_type
+        isMarkdown(entry) -> R.string.markdown_type
+        isText(entry) -> R.string.text_type
+        mimeType(entry).startsWith("image/") -> R.string.image_type
+        else -> R.string.file_type
     }
 
     private fun native(request: JSONObject): Any {
@@ -316,6 +545,53 @@ class MainActivity : Activity() {
         } catch (error: Exception) {
             snapshotFile.failWrite(output)
             throw error
+        }
+    }
+
+    private fun networkOperation(action: () -> Unit) {
+        if (busy || pendingNetworkAction != null) return
+        if (Build.VERSION.SDK_INT >= 37 &&
+            checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) != PackageManager.PERMISSION_GRANTED) {
+            pendingNetworkAction = action
+            status.setText(R.string.local_network_request)
+            updateControls()
+            requestPermissions(arrayOf(Manifest.permission.ACCESS_LOCAL_NETWORK), LOCAL_NETWORK_PERMISSION)
+        } else {
+            operation(action)
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != LOCAL_NETWORK_PERMISSION) return
+        val action = pendingNetworkAction ?: return
+        pendingNetworkAction = null
+        updateControls()
+        if (isFinishing || isDestroyed) return
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+            operation(action)
+        } else {
+            status.setText(R.string.local_network_denied)
+            val dialog = AlertDialog.Builder(this)
+                .setTitle(R.string.local_network_title)
+                .setMessage(R.string.local_network_denied)
+                .setPositiveButton(R.string.internet_only) { _, _ ->
+                    pendingNetworkAction = null
+                    operation(action)
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .create()
+            pendingNetworkAction = action
+            networkPermissionDialog = dialog
+            updateControls()
+            dialog.setOnDismissListener {
+                pendingNetworkAction = null
+                networkPermissionDialog = null
+                updateControls()
+            }
+            dialog.show()
         }
     }
 
@@ -339,33 +615,83 @@ class MainActivity : Activity() {
     }
 
     private fun showError(error: Exception) {
+        Log.e("SpacesAndroid", "Android operation failed:")
+        // Log's Throwable overload omits UnknownHostException and can truncate long traces.
+        error.stackTraceToString().lineSequence().forEach { line ->
+            var start = 0
+            do {
+                var end = minOf(start + 1000, line.length)
+                if (end < line.length && line[end - 1].isHighSurrogate()) end--
+                Log.e("SpacesAndroid", line.substring(start, end))
+                start = end
+            } while (start < line.length)
+        }
         status.text = getString(R.string.error, error.message ?: error.javaClass.simpleName)
     }
 
     private fun renderEntries() {
-        breadcrumb.text = folders.joinToString(" / ") { it.second }
-        list.adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, entries.map {
-            if (it.getInt("type") == 2) getString(R.string.folder, it.getString("name"))
-            else getString(R.string.file, it.getString("name"), it.getLong("size"))
-        })
+        breadcrumb.removeAllViews()
+        folders.forEachIndexed { index, (_, name) ->
+            if (index > 0) breadcrumb.addView(TextView(this).apply { text = " / " })
+            breadcrumb.addView(TextView(this).apply {
+                text = if (index == 0) getString(R.string.all_files) else name
+                textSize = 14f
+                setPadding(dp(8), dp(12), dp(8), dp(12))
+                setTypeface(typeface, if (index == folders.lastIndex) Typeface.BOLD else Typeface.NORMAL)
+                isEnabled = connected && index != folders.lastIndex
+                setOnClickListener {
+                    val path = folders.take(index + 1)
+                    networkOperation { loadFolder(path) }
+                }
+            })
+        }
+        emptyState.setText(if (connected) R.string.empty else R.string.browse_hint)
+        list.adapter = object : ArrayAdapter<JSONObject>(this, R.layout.file_row, entries) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val row = convertView ?: layoutInflater.inflate(R.layout.file_row, parent, false)
+                val entry = getItem(position)!!
+                val folder = entry.getInt("type") == 2
+                row.findViewById<TextView>(R.id.file_name).text = entry.getString("name")
+                row.findViewById<TextView>(R.id.file_details).text =
+                    if (folder) getString(R.string.folder_type)
+                    else getString(R.string.file_details, getString(fileType(entry)),
+                        Formatter.formatShortFileSize(this@MainActivity, entry.getLong("size")))
+                row.findViewById<ImageView>(R.id.file_icon).setImageResource(
+                    if (folder) R.drawable.ic_folder else R.drawable.ic_document
+                )
+                row.findViewById<ImageView>(R.id.folder_arrow).visibility =
+                    if (folder) View.VISIBLE else View.INVISIBLE
+                return row
+            }
+        }
     }
 
     private fun updateControls() {
-        controls.forEach { it.isEnabled = !busy }
-        reconnect.isEnabled = !busy && snapshotFile.baseFile.exists()
-        forget.isEnabled = !busy && (connected || snapshotFile.baseFile.exists())
-        refresh.isEnabled = !busy && connected
-        up.isEnabled = !busy && connected && folders.size > 1
+        val available = !busy && pendingNetworkAction == null && userNameDialog == null
+        progress.visibility = if (busy) View.VISIBLE else View.INVISIBLE
+        controls.forEach { it.isEnabled = available }
+        for (index in 0 until breadcrumb.childCount) {
+            breadcrumb.getChildAt(index).isEnabled =
+                available && connected && index < breadcrumb.childCount - 1
+        }
+        reconnect.isEnabled = available && snapshotFile.baseFile.exists()
+        forget.isEnabled = available && (connected || snapshotFile.baseFile.exists())
+        refresh.isEnabled = available && connected
+        up.isEnabled = available && connected && folders.size > 1
     }
 
     override fun onDestroy() {
+        pendingNetworkAction = null
+        networkPermissionDialog?.dismiss()
+        userNameDialog?.dismiss()
         previewDialog?.dismiss()
         worker.shutdown()
         super.onDestroy()
     }
 
     companion object {
-        private const val IMPORT_SNAPSHOT = 1
+        private const val IMPORT_INVITATION = 1
         private const val IMPORT_CERTIFICATE = 2
+        private const val LOCAL_NETWORK_PERMISSION = 3
     }
 }

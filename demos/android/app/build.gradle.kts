@@ -1,16 +1,20 @@
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
 }
 
 android {
     namespace = "org.encryptedspaces.android"
-    compileSdk = 35
-    ndkVersion = "27.2.12479018"
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 2
+        }
+    }
+    buildToolsVersion = "37.0.0"
+    ndkVersion = "30.0.16248370"
     defaultConfig {
         applicationId = "org.encryptedspaces.android"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 37
         versionCode = 1
         versionName = "0.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -23,7 +27,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -31,7 +34,16 @@ android {
     }
 }
 
+androidComponents {
+    onVariants(selector().withBuildType("debug")) { variant ->
+        variant.packaging.jniLibs.keepDebugSymbols.add("**/libspaces_android.so")
+        // Rust's symbolizer needs an ELF file it can open, not an APK entry.
+        variant.packaging.jniLibs.useLegacyPackaging.set(true)
+    }
+}
+
 dependencies {
+    implementation("io.noties.markwon:core:4.6.2")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
 }

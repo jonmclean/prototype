@@ -8,6 +8,9 @@ license.workspace = true
 name = "spaces_android"
 crate-type = ["cdylib", "rlib"]
 
+[build-dependencies]
+encrypted-spaces-sdk-codegen = { workspace = true }
+
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true

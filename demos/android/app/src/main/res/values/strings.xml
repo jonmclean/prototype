@@ -1,20 +1,43 @@
 <resources>
     <string name="app_name">Spaces Files</string>
-    <string name="title">Encrypted Spaces Files</string>
-    <string name="warning">Research demo. Import trusted desktop state only. File contents stay in memory and are never saved locally.</string>
+    <string name="files_title">Files</string>
+    <string name="space_brand">Encrypted Spaces</string>
+    <string name="connection">Connection</string>
+    <string name="connect_as">Connect to space as</string>
+    <string name="connect">Connect</string>
+    <string name="user_name">User name</string>
+    <string name="user_name_explanation">Choose the display name other members will see. Your invitation determines your account.</string>
+    <string name="user_name_required">Enter a user name.</string>
+    <string name="all_files">All files</string>
+    <string name="folder_type">Folder</string>
+    <string name="text_type">Text document</string>
+    <string name="markdown_type">Markdown document</string>
+    <string name="image_type">Image</string>
+    <string name="file_type">File</string>
+    <string name="file_details">%1$s · %2$s</string>
+    <string name="browse_hint">Connect to a space to browse your files.</string>
+    <string name="view_source">View source</string>
+    <string name="view_rendered">Rendered</string>
+    <string name="close_preview">Close</string>
+    <string name="warning">Research demo. Import trusted invitations only. File contents stay in memory and are never saved locally.</string>
     <string name="endpoint_hint">wss://storage.example.org/ws</string>
-    <string name="import_snapshot">Import snapshot</string>
+    <string name="import_invitation">Import invitation</string>
+    <string name="endpoint_required">Enter the server WebSocket address before importing an invitation.</string>
     <string name="restore">Reconnect</string>
     <string name="certificate">Trust certificate</string>
     <string name="forget">Forget space</string>
     <string name="refresh">Refresh</string>
     <string name="up">Up</string>
-    <string name="disconnected">Import a desktop chat_snapshot.json to connect.</string>
+    <string name="disconnected">Enter the server address and import an invitation to join. Desktop snapshots are not accepted.</string>
     <string name="working">Working</string>
+    <string name="local_network_request">Allow nearby-device access to connect to LAN or emulator-host storage.</string>
+    <string name="local_network_title">Local network access denied</string>
+    <string name="local_network_denied">LAN and emulator-host storage require nearby-device permission. Enable it in system Settings > Apps > Spaces Files > Permissions. You can continue without it for internet-only storage.</string>
+    <string name="internet_only">Continue internet-only</string>
     <string name="empty">This folder is empty.</string>
     <plurals name="file_count">
-        <item quantity="one">%1$d entry. Tap a folder to browse or a file to read.</item>
-        <item quantity="other">%1$d entries. Tap a folder to browse or a file to read.</item>
+        <item quantity="one">%1$d item</item>
+        <item quantity="other">%1$d items</item>
     </plurals>
     <string name="preview">Preview only. Nothing saved to this device.</string>
     <string name="text_truncated">Preview limited to the first 256 KiB.</string>
@@ -22,6 +45,4 @@
     <string name="invalid_image">This image could not be decoded.</string>
     <string name="cert_added">Certificate added for this session. Reconnect to apply it.</string>
     <string name="error">Error: %1$s</string>
-    <string name="folder">Folder: %1$s</string>
-    <string name="file">%1$s (%2$d B)</string>
 </resources>
