@@ -13,6 +13,13 @@
     <string name="text_type">Text document</string>
     <string name="markdown_type">Markdown document</string>
     <string name="image_type">Image</string>
+    <string name="video_type">MP4 video</string>
+    <string name="video_loading">Loading video...</string>
+    <string name="video_play">Play</string>
+    <string name="video_pause">Pause</string>
+    <string name="video_position">Video position</string>
+    <string name="invalid_video">This MP4 could not be played. It may be damaged or use a codec this device does not support.</string>
+    <string name="video_decode_error">Video playback failed (media error %1$d, detail %2$d).</string>
     <string name="file_type">File</string>
     <string name="file_details">%1$s · %2$s</string>
     <string name="browse_hint">Connect to a space to browse your files.</string>

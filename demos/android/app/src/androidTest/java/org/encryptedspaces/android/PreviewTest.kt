@@ -4,6 +4,7 @@ import android.content.Intent
 import android.app.AlertDialog
 import android.graphics.Typeface
 import android.graphics.Bitmap
+import android.graphics.drawable.BitmapDrawable
 import android.text.Spanned
 import io.noties.markwon.core.spans.StrongEmphasisSpan
 import android.view.View
@@ -131,7 +132,15 @@ class PreviewTest {
                     JSONObject().put("name", "README.md").put("type", 1)
                         .put("size", 2048).put("mime_type", "application/octet-stream"),
                     JSONObject().put("name", "notes.txt").put("type", 1)
-                        .put("size", 12).put("mime_type", "application/octet-stream")
+                        .put("size", 12).put("mime_type", "application/octet-stream"),
+                    JSONObject().put("name", "clip.MP4").put("type", 1)
+                        .put("size", 1024).put("mime_type", "application/octet-stream"),
+                    JSONObject().put("name", "movie").put("type", 1)
+                        .put("size", 1024).put("mime_type", "video/mp4"),
+                    JSONObject().put("name", "photo.JPG").put("type", 1)
+                        .put("size", 1024).put("mime_type", "application/octet-stream"),
+                    JSONObject().put("name", "picture.png").put("type", 1)
+                        .put("size", 1024)
                 )
                 MainActivity::class.java.getDeclaredField("entries")
                     .apply { isAccessible = true }.set(activity, entries)
@@ -139,7 +148,7 @@ class PreviewTest {
                     .apply { isAccessible = true }.invoke(activity)
                 val list = MainActivity::class.java.getDeclaredField("list")
                     .apply { isAccessible = true }.get(activity) as ListView
-                assertEquals(3, list.adapter.count)
+                assertEquals(7, list.adapter.count)
                 for (index in entries.indices) {
                     val row = list.adapter.getView(index, null, list)
                     assertEquals(entries[index].getString("name"),
@@ -149,7 +158,9 @@ class PreviewTest {
                         when (index) {
                             0 -> R.string.folder_type
                             1 -> R.string.markdown_type
-                            else -> R.string.text_type
+                            2 -> R.string.text_type
+                            3, 4 -> R.string.video_type
+                            else -> R.string.image_type
                         }
                     )))
                     if (index > 0) assertTrue(details.contains("B"))
@@ -225,6 +236,73 @@ class PreviewTest {
             instrumentation.waitForIdleSync()
             assertTrue(binaryBytes.all { it == 0.toByte() })
         } finally {
+            instrumentation.runOnMainSync { activity.finish() }
+        }
+    }
+
+    @Test fun imageFilenameFallbacksDecodeInMemoryAndKeepPreviewsBounded() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val activity = instrumentation.startActivitySync(
+            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        ) as MainActivity
+        val fixture = ByteArrayOutputStream().use { output ->
+            val bitmap = Bitmap.createBitmap(4097, 1, Bitmap.Config.ARGB_8888)
+            bitmap.eraseColor(android.graphics.Color.RED)
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
+            bitmap.recycle()
+            output.toByteArray()
+        }
+        val before = context.dataDir.walkTopDown().filter { it.isFile }
+            .map { it.relativeTo(context.dataDir).path }.toSet()
+        try {
+            val preview = MainActivity::class.java.getDeclaredMethod(
+                "preview", JSONObject::class.java, ByteArray::class.java
+            ).apply { isAccessible = true }
+            val dialogField = MainActivity::class.java.getDeclaredField("previewDialog")
+                .apply { isAccessible = true }
+            for ((name, mime) in listOf(
+                "photo.JPG" to "application/octet-stream",
+                "picture.PNG" to "",
+                "picture.webp" to null,
+                "picture" to "IMAGE/PNG; charset=binary"
+            )) {
+                val bytes = fixture.copyOf()
+                lateinit var bitmap: Bitmap
+                instrumentation.runOnMainSync {
+                    // BitmapFactory detects the actual encoding from bytes, not the filename.
+                    preview.invoke(activity, JSONObject().put("name", name)
+                        .put("mime_type", mime), bytes)
+                    val dialog = dialogField.get(activity) as AlertDialog
+                    assertTrue(dialog.window!!.attributes.flags and
+                        WindowManager.LayoutParams.FLAG_SECURE != 0)
+                    assertEquals(WindowManager.LayoutParams.MATCH_PARENT,
+                        dialog.window!!.attributes.height)
+                    fun images(view: View): List<ImageView> = when (view) {
+                        is ImageView -> listOf(view)
+                        is ViewGroup -> (0 until view.childCount).flatMap {
+                            images(view.getChildAt(it))
+                        }
+                        else -> emptyList()
+                    }
+                    bitmap = (images(dialog.window!!.decorView).single {
+                        it.drawable is BitmapDrawable &&
+                            (it.drawable as BitmapDrawable).bitmap.width > 100
+                    }.drawable as BitmapDrawable).bitmap
+                    assertTrue(bitmap.width <= 2048)
+                    assertTrue(bitmap.height <= 2048)
+                    assertEquals(android.graphics.Color.RED, bitmap.getPixel(0, 0))
+                    dialog.dismiss()
+                }
+                instrumentation.waitForIdleSync()
+                assertTrue(bytes.all { it == 0.toByte() })
+                assertTrue(bitmap.isRecycled)
+            }
+            val after = context.dataDir.walkTopDown().filter { it.isFile }
+                .map { it.relativeTo(context.dataDir).path }.toSet()
+            assertEquals(before, after)
+        } finally {
+            fixture.fill(0)
             instrumentation.runOnMainSync { activity.finish() }
         }
     }

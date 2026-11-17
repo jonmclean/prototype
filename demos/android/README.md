@@ -98,9 +98,14 @@ Rust output is isolated in the repository's `target/android`.
    monospace reader. Markdown (`.md`, `.markdown`, `.mdown`, or Markdown MIME type)
    is rendered with headings, lists, emphasis, and code blocks; **View source**
    switches to the original text. Filename detection also recognizes text files
-   when their MIME type is missing or generic. Images have a downsampled preview.
-   Other file types show a byte-count message. Links are not interactive and
-   remote images are not fetched.
+   when their MIME type is missing or generic. Images have a downsampled preview;
+   filename detection recognizes JPEG, PNG, GIF, WebP, BMP, HEIF/HEIC, and AVIF
+   when their MIME type is missing or generic. Image decoding support depends on
+   the device; animated images show a still frame.
+   MP4 videos (`.mp4` or `video/mp4`) play in memory with **Play**/**Pause** and a
+   seek bar; codec support depends on the device. Playback pauses when the app
+   goes into the background. Other file types show a byte-count message.
+   Links are not interactive and remote images are not fetched.
 1. **Reconnect** restores the privately saved connection after restarting the app.
    It also prompts for a name, allowing the existing member's display name to change.
    **Forget space** removes that connection state.
@@ -140,6 +145,9 @@ transient copies in RAM; this is not a guarantee of forensic memory erasure.
 The initial demo limits reads to 32 MiB based on verified file metadata and
 checks the decrypted length against that metadata. Text previews show the first
 256 KiB, and images are downsampled to at most 2048 pixels on either axis.
+MP4 playback uses a seekable in-memory media source, not a temporary file or
+external player, and keeps the same 32 MiB file limit. Closing or replacing the
+preview releases the player and clears its source buffer.
 The SDK currently buffers a whole ciphertext response, so the size limit is not
 a hardened defense against an untrusted oversized HTTP response.
 

@@ -48,6 +48,7 @@ class MainActivity : Activity() {
     private var busy = false
     private var extraCertificates = emptyList<String>()
     private var previewDialog: AlertDialog? = null
+    private var previewVideo: VideoPreview? = null
     private var networkPermissionDialog: AlertDialog? = null
     private var userNameDialog: AlertDialog? = null
     private var pendingNetworkAction: (() -> Unit)? = null
@@ -405,19 +406,25 @@ class MainActivity : Activity() {
 
     private fun preview(entry: JSONObject, bytes: ByteArray) {
         previewDialog?.dismiss()
-        val mime = mimeType(entry)
-        val isMarkdown = isMarkdown(entry)
+        val isVideo = isMp4(entry)
+        val isMarkdown = !isVideo && isMarkdown(entry)
         var textView: TextView? = null
         var source: String? = null
         var sourceVisible = false
         var releaseImage: (() -> Unit)? = null
+        var video: VideoPreview? = null
         val view: View = when {
-            mime.startsWith("image/") && !isText(entry) -> {
+            isVideo -> VideoPreview(this, bytes, ::showError).also {
+                video = it
+                previewVideo = it
+            }
+            isImage(entry) && !isText(entry) -> {
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
                 require(bounds.outWidth > 0 && bounds.outHeight > 0) { getString(R.string.invalid_image) }
                 var sample = 1
-                while (bounds.outWidth / sample > 2048 || bounds.outHeight / sample > 2048) sample *= 2
+                while (bounds.outWidth.toLong() > 2048L * sample ||
+                    bounds.outHeight.toLong() > 2048L * sample) sample *= 2
                 val options = BitmapFactory.Options().apply { inSampleSize = sample }
                 val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
                     ?: error(getString(R.string.invalid_image))
@@ -465,6 +472,8 @@ class MainActivity : Activity() {
         builder.create().apply {
             previewDialog = this
             setOnDismissListener {
+                video?.release()
+                if (previewVideo === video) previewVideo = null
                 bytes.fill(0)
                 textView?.text = ""
                 source = null
@@ -508,6 +517,14 @@ class MainActivity : Activity() {
         mimeType(entry) in setOf("text/markdown", "text/x-markdown") ||
             extension(entry) in setOf("md", "markdown", "mdown")
 
+    private fun isMp4(entry: JSONObject) =
+        mimeType(entry) == "video/mp4" || extension(entry) == "mp4"
+
+    private fun isImage(entry: JSONObject) =
+        mimeType(entry).startsWith("image/") ||
+            extension(entry) in setOf("jpg", "jpeg", "png", "gif", "webp", "bmp",
+                "heif", "heic", "avif")
+
     private fun isText(entry: JSONObject): Boolean {
         val mime = mimeType(entry)
         return isMarkdown(entry) || mime.startsWith("text/") ||
@@ -517,9 +534,10 @@ class MainActivity : Activity() {
 
     private fun fileType(entry: JSONObject): Int = when {
         entry.getInt("type") == 2 -> R.string.folder_type
+        isMp4(entry) -> R.string.video_type
         isMarkdown(entry) -> R.string.markdown_type
         isText(entry) -> R.string.text_type
-        mimeType(entry).startsWith("image/") -> R.string.image_type
+        isImage(entry) -> R.string.image_type
         else -> R.string.file_type
     }
 
@@ -645,6 +663,11 @@ class MainActivity : Activity() {
         forget.isEnabled = available && (connected || snapshotFile.baseFile.exists())
         refresh.isEnabled = available && connected
         up.isEnabled = available && connected && folders.size > 1
+    }
+
+    override fun onStop() {
+        previewVideo?.pause()
+        super.onStop()
     }
 
     override fun onDestroy() {
