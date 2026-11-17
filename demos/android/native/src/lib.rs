@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use encrypted_spaces_sdk::{File, Space, SpaceInvite, WebSocketTransport};
+use encrypted_spaces_sdk::{File, QueryParam, Space, SpaceInvite, WebSocketTransport};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -13,6 +13,16 @@ mod diagnostics;
 include!(concat!(env!("OUT_DIR"), "/sdk_codegen.rs"));
 
 pub const MAX_READ_BYTES: i64 = 32 * 1024 * 1024;
+
+#[cfg(any(target_os = "android", test))]
+fn is_transport_failure(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<encrypted_spaces_sdk::SdkErrorType>(),
+            Some(encrypted_spaces_sdk::SdkErrorType::TransportError(_))
+        ) || cause.is::<tokio::time::error::Elapsed>()
+    })
+}
 
 /// App-private reconnect state, never accepted by the invitation importer.
 #[derive(Deserialize, Serialize)]
@@ -29,6 +39,7 @@ pub struct Inode {
     #[serde(rename = "type")]
     pub inode_type: i64,
     pub size: i64,
+    pub mtime: i64,
     pub mime_type: String,
     pub file_hash: File,
 }
@@ -232,7 +243,137 @@ impl Client {
             .ok_or_else(|| anyhow::anyhow!("File or folder {id} no longer exists"))
     }
 
+    pub async fn stat(&self, id: i64) -> Result<Inode> {
+        if id <= 0 {
+            bail!("Invalid document id");
+        }
+        self.space.sync().await?;
+        self.inode(id).await
+    }
+
+    pub async fn create(&self, parent_id: i64, name: &str, mime_type: &str) -> Result<Inode> {
+        Self::validate_name(name)?;
+        self.list(parent_id).await?;
+        let folder = mime_type == "vnd.android.document/directory";
+        let file = if folder {
+            File::from_hash("0".repeat(64))
+        } else {
+            self.space.file().upload(File::from_data(vec![])).await?
+        };
+        let now = Self::timestamp()?;
+        let fields = vec![
+            ("parent_id".into(), QueryParam::Integer(parent_id)),
+            (
+                "author_id".into(),
+                QueryParam::Integer(i64::from(
+                    self.space.uid().context("Missing connected user id")?,
+                )),
+            ),
+            ("name".into(), QueryParam::Text(name.into())),
+            (
+                "type".into(),
+                QueryParam::Integer(if folder { 2 } else { 1 }),
+            ),
+            ("size".into(), QueryParam::Integer(0)),
+            ("ctime".into(), QueryParam::Integer(now)),
+            ("mtime".into(), QueryParam::Integer(now)),
+            ("mime_type".into(), QueryParam::Text(mime_type.into())),
+            ("file_hash".into(), QueryParam::Text(file.hash()?.into())),
+        ];
+        let id = self.space.call_insert_action("add_inode", fields).await?;
+        self.inode(id).await
+    }
+
+    pub async fn write(&self, id: i64, bytes: Vec<u8>, expected_hash: &str) -> Result<Inode> {
+        if bytes.len() as i64 > MAX_READ_BYTES {
+            bail!("Files are limited to 32 MiB");
+        }
+        let inode = self.stat(id).await?;
+        validate_read(&inode)?;
+        if inode.file_hash.hash()? != expected_hash {
+            bail!("File changed since it was opened; reopen it before saving");
+        }
+        let size = bytes.len() as i64;
+        let file = self.space.file().upload(File::from_data(bytes)).await?;
+        let updated = self
+            .space
+            .call_update_action(
+                "write_inode",
+                id,
+                vec![
+                    ("file_hash".into(), QueryParam::Text(file.hash()?.into())),
+                    ("size".into(), QueryParam::Integer(size)),
+                    ("mtime".into(), QueryParam::Integer(Self::timestamp()?)),
+                ],
+            )
+            .await
+            .context("Cannot save file; the server must support the write_inode schema action")?;
+        if updated != 1 {
+            bail!("File was not saved");
+        }
+        self.inode(id).await
+    }
+
+    pub async fn rename(&self, id: i64, name: &str) -> Result<Inode> {
+        Self::validate_name(name)?;
+        self.stat(id).await?;
+        let updated = self
+            .space
+            .call_update_action(
+                "rename_inode",
+                id,
+                vec![
+                    ("name".into(), QueryParam::Text(name.into())),
+                    ("mtime".into(), QueryParam::Integer(Self::timestamp()?)),
+                ],
+            )
+            .await?;
+        if updated != 1 {
+            bail!("Document was not renamed");
+        }
+        self.inode(id).await
+    }
+
+    pub async fn delete(&self, id: i64) -> Result<()> {
+        self.stat(id).await?;
+        // Walk before deleting anything: malformed/cyclic trees must not recurse forever.
+        let mut pending = vec![id];
+        let mut ordered = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        while let Some(current) = pending.pop() {
+            if !seen.insert(current) {
+                bail!("Cycle in document tree");
+            }
+            let children: Vec<Inode> = self
+                .space
+                .table("inodes")
+                .select()
+                .where_eq("parent_id", current)
+                .all()
+                .await?;
+            pending.extend(children.into_iter().map(|child| child.id));
+            ordered.push(current);
+        }
+        for current in ordered.into_iter().rev() {
+            let deleted = self
+                .space
+                .table::<Inode>("inodes")
+                .delete()
+                .where_eq("id", current)
+                .execute()
+                .await?;
+            if deleted != 1 {
+                bail!("Document {current} was not deleted; a folder deletion may be partial");
+            }
+        }
+        Ok(())
+    }
+
     pub async fn read(&self, id: i64) -> Result<Vec<u8>> {
+        Ok(self.read_version(id).await?.1)
+    }
+
+    pub async fn read_version(&self, id: i64) -> Result<(Inode, Vec<u8>)> {
         self.space.sync().await?;
         let inode = self.inode(id).await?;
         validate_read(&inode)?;
@@ -246,7 +387,21 @@ impl Client {
         if bytes.len() as i64 != inode.size {
             bail!("Downloaded file size does not match its verified metadata");
         }
-        Ok(bytes)
+        Ok((inode, bytes))
+    }
+
+    fn timestamp() -> Result<i64> {
+        Ok(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs()
+            .try_into()?)
+    }
+
+    fn validate_name(name: &str) -> Result<()> {
+        if name.trim().is_empty() || matches!(name, "." | "..") || name.contains(['/', '\0']) {
+            bail!("Enter a non-empty document name without slashes or NUL characters");
+        }
+        Ok(())
     }
 
     pub async fn snapshot(&self) -> Result<Connection> {
@@ -274,6 +429,125 @@ fn validate_read(inode: &Inode) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn recovery_classifies_transport_and_timeout_without_parsing_messages() {
+        use encrypted_spaces_sdk::SdkErrorType;
+        let transport = anyhow::Error::new(SdkErrorType::TransportError("closed".into()))
+            .context("Read failed");
+        assert!(is_transport_failure(&transport));
+        let timeout = tokio::time::timeout(std::time::Duration::ZERO, std::future::pending::<()>())
+            .await
+            .unwrap_err();
+        assert!(is_transport_failure(
+            &anyhow::Error::new(timeout).context("Read failed")
+        ));
+        for error in [
+            SdkErrorType::AccessDenied("denied".into()),
+            SdkErrorType::ValidationError("connection closed".into()),
+            SdkErrorType::DatabaseError("remote error".into()),
+            SdkErrorType::RootHashError("invalid proof".into()),
+            SdkErrorType::DecryptionError("invalid ciphertext".into()),
+        ] {
+            assert!(!is_transport_failure(
+                &anyhow::Error::new(error).context("Read failed")
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn cloud_documents_crud_and_stale_write_rejection() {
+        let transport = encrypted_spaces_sdk::local_transport::LocalTransport::from_schema_file(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../tauri/app_schema.kdl"),
+        )
+        .await
+        .unwrap();
+        let space = Space::create(transport, sdk_codegen::application_schema())
+            .await
+            .unwrap();
+        let client = Client {
+            connection: Connection {
+                user_info: serde_json::json!({"user_id": space.uid().unwrap()}),
+                space_snapshot: space.snapshot().await.unwrap(),
+            },
+            space,
+        };
+        let folder = client
+            .create(0, "Documents", "vnd.android.document/directory")
+            .await
+            .unwrap();
+        let file = client
+            .create(folder.id, "draft.txt", "text/plain")
+            .await
+            .unwrap();
+        assert!(client.read(file.id).await.unwrap().is_empty());
+        let original_hash = file.file_hash.hash().unwrap().to_string();
+        let written = client
+            .write(file.id, b"encrypted cloud content".to_vec(), &original_hash)
+            .await
+            .unwrap();
+        assert_eq!(written.size, 23);
+        assert_eq!(
+            client.read(file.id).await.unwrap(),
+            b"encrypted cloud content"
+        );
+        assert!(!serde_json::to_string(&client.snapshot().await.unwrap())
+            .unwrap()
+            .contains("encrypted cloud content"));
+        assert!(client
+            .write(
+                file.id,
+                vec![0; MAX_READ_BYTES as usize + 1],
+                written.file_hash.hash().unwrap()
+            )
+            .await
+            .is_err());
+        assert!(client
+            .write(file.id, b"stale edit".to_vec(), &original_hash)
+            .await
+            .is_err());
+        assert_eq!(
+            client.read(file.id).await.unwrap(),
+            b"encrypted cloud content"
+        );
+        let renamed = client.rename(file.id, "final.txt").await.unwrap();
+        assert_eq!(renamed.id, file.id);
+        assert_eq!(renamed.name, "final.txt");
+        assert!(client.create(file.id, "child", "text/plain").await.is_err());
+        assert!(client.create(-1, "child", "text/plain").await.is_err());
+        assert!(client
+            .write(folder.id, vec![], &"0".repeat(64))
+            .await
+            .is_err());
+        assert!(client.read(folder.id).await.is_err());
+        for invalid in ["", " ", ".", "..", "a/b", "a\0b"] {
+            assert!(client.create(0, invalid, "text/plain").await.is_err());
+            assert!(client.rename(file.id, invalid).await.is_err());
+        }
+        assert!(client.delete(0).await.is_err());
+        let cleared = client
+            .write(file.id, vec![], written.file_hash.hash().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(cleared.size, 0);
+        assert!(client.read(file.id).await.unwrap().is_empty());
+        let entries = client.list(folder.id).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "final.txt");
+        let nested = client
+            .create(folder.id, "Nested", "vnd.android.document/directory")
+            .await
+            .unwrap();
+        let descendant = client
+            .create(nested.id, "nested.txt", "text/plain")
+            .await
+            .unwrap();
+        client.delete(folder.id).await.unwrap();
+        assert!(client.list(0).await.unwrap().is_empty());
+        assert!(client.stat(file.id).await.is_err());
+        assert!(client.stat(folder.id).await.is_err());
+        assert!(client.stat(descendant.id).await.is_err());
+    }
 
     #[test]
     fn endpoint_validation() {

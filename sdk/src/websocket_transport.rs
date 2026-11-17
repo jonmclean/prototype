@@ -76,6 +76,8 @@ pub struct WebSocketTransport {
     ephemeral_tx: tokio::sync::broadcast::Sender<crate::transport::EphemeralEvent>,
     // Background read loop task handle
     read_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
     // WebSocket URL (base, without space= or auth= query params)
     url: String,
     // Base64url-encoded auth context (set during authenticate, used for file HTTP requests)
@@ -175,6 +177,7 @@ impl WebSocketTransport {
             bcast_tx,
             ephemeral_tx,
             read_task: tokio::sync::Mutex::new(None),
+            connected: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             url: url.to_string(),
             auth_b64: tokio::sync::Mutex::new(None),
             file_client,
@@ -206,17 +209,20 @@ impl WebSocketTransport {
             }
             None => connect_async(&connect_url).await,
         }
-        .map_err(|e| SdkError::DatabaseError(format!("connect ws failed: {e}")))?;
+        .map_err(|e| SdkError::TransportError(format!("connect ws failed: {e}")))?;
 
         let (write, mut read) = stream.split();
 
         let pending_clone = self.pending.clone();
         let bcast_clone = self.bcast_tx.clone();
         let ephemeral_clone = self.ephemeral_tx.clone();
+        let connected = self.connected.clone();
+        connected.store(true, std::sync::atomic::Ordering::Release);
 
         // Spawn background read loop
         let task = tokio::spawn(async move {
             use async_tungstenite::tungstenite::Message;
+            let mut closed_reason = "connection closed".to_string();
             while let Some(item) = read.next().await {
                 match item {
                     Ok(Message::Binary(data)) => match WsFrame::decode(&data[..]) {
@@ -282,12 +288,6 @@ impl WebSocketTransport {
                     },
                     Ok(Message::Close(cf)) => {
                         log_debug!("read_loop: connection closed: {:?}", cf);
-                        let mut map = pending_clone.lock().await;
-                        for (_id, tx) in map.drain() {
-                            let _ = tx.send(PendingResponse::Db(Err(SdkError::DatabaseError(
-                                "connection closed".into(),
-                            ))));
-                        }
                         break;
                     }
                     Ok(_other) => {
@@ -295,15 +295,18 @@ impl WebSocketTransport {
                     }
                     Err(e) => {
                         log_debug!("read_loop: read error err={}", e);
-                        let mut map = pending_clone.lock().await;
-                        for (_id, tx) in map.drain() {
-                            let _ = tx.send(PendingResponse::Db(Err(SdkError::DatabaseError(
-                                format!("read error: {e}"),
-                            ))));
-                        }
+                        closed_reason = format!("read error: {e}");
                         break;
                     }
                 }
+            }
+            // Share the pending lock with registration so a close cannot miss a new waiter.
+            let mut map = pending_clone.lock().await;
+            connected.store(false, std::sync::atomic::Ordering::Release);
+            for (_id, tx) in map.drain() {
+                let _ = tx.send(PendingResponse::Db(Err(SdkError::TransportError(
+                    closed_reason.clone(),
+                ))));
             }
             log_debug!("read_loop: terminated");
         });
@@ -334,6 +337,9 @@ impl WebSocketTransport {
         let (tx, rx) = oneshot::channel::<PendingResponse>();
         {
             let mut map = self.pending.lock().await;
+            if !self.connected.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(SdkError::TransportError("connection closed".into()));
+            }
             if map.insert(request_id.clone(), tx).is_some() {
                 log_debug!(
                     "native send_request: replaced existing pending id={}",
@@ -344,21 +350,31 @@ impl WebSocketTransport {
 
         // Send frame
         let mut guard = self.write.lock().await;
-        let writer = guard.as_mut().ok_or_else(|| {
-            SdkError::DatabaseError("not connected — call authenticate() first".into())
-        })?;
-        if let Err(e) = writer.send(Message::Binary(encoded)).await {
+        let sent = match guard.as_mut() {
+            Some(writer) => writer
+                .send(Message::Binary(encoded))
+                .await
+                .map_err(|e| SdkError::TransportError(format!("send failed: {e}"))),
+            None => Err(SdkError::TransportError("connection closed".into())),
+        };
+        if let Err(error) = sent {
             drop(guard);
             let mut map = self.pending.lock().await;
-            map.remove(&request_id);
-            return Err(SdkError::DatabaseError(format!("send failed: {e}")));
+            self.connected
+                .store(false, std::sync::atomic::Ordering::Release);
+            for (_id, tx) in map.drain() {
+                let _ = tx.send(PendingResponse::Db(Err(SdkError::TransportError(
+                    error.to_string(),
+                ))));
+            }
+            return Err(error);
         }
         drop(guard);
 
         // Await response delivered by read loop
         let pending_resp = rx
             .await
-            .map_err(|_| SdkError::DatabaseError("response channel closed".into()))?;
+            .map_err(|_| SdkError::TransportError("response channel closed".into()))?;
         match pending_resp {
             PendingResponse::Db(result) => {
                 let resp = result?;
@@ -372,6 +388,16 @@ impl WebSocketTransport {
         }
     }
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for WebSocketTransport {
+    fn drop(&mut self) {
+        if let Some(task) = self.read_task.get_mut().take() {
+            task.abort();
+        }
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 use {
     futures_channel::{mpsc, oneshot},
@@ -907,6 +933,8 @@ impl Transport for WebSocketTransport {
 
         // Tear down existing connection and reconnect with the new auth context.
         // auth_context.space_id determines which space the connection is scoped to.
+        self.connected
+            .store(false, std::sync::atomic::Ordering::Release);
         if let Some(task) = self.read_task.lock().await.take() {
             task.abort();
         }
@@ -1012,12 +1040,12 @@ impl Transport for WebSocketTransport {
             .file_client
             .get(url)
             .await
-            .map_err(|e| SdkError::DatabaseError(format!("file download failed: {e}")))?;
+            .map_err(|e| SdkError::TransportError(format!("file download failed: {e}")))?;
 
         if resp.status().is_success() {
             let bytes = hyper::body::to_bytes(resp.into_body())
                 .await
-                .map_err(|e| SdkError::DatabaseError(format!("file download body: {e}")))?;
+                .map_err(|e| SdkError::TransportError(format!("file download body: {e}")))?;
             Ok(bytes.to_vec())
         } else {
             Err(SdkError::DatabaseError(format!("file not found: {hash}")))
@@ -1067,5 +1095,78 @@ mod hash_backed_change_request_tests {
 
         assert_eq!(request.retention_proofs, vec![b"proof".to_vec()]);
         assert_eq!(request.values_sidecar, vec![full_value]);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod connection_tests {
+    use super::*;
+    use futures_util::StreamExt;
+    use std::time::Duration;
+    use tokio::{net::TcpListener, time::timeout};
+
+    #[tokio::test]
+    async fn closed_connections_fail_pending_and_subsequent_requests() {
+        for graceful in [true, false] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = async_tungstenite::tokio::accept_async(stream)
+                    .await
+                    .unwrap();
+                socket.next().await.unwrap().unwrap();
+                if graceful {
+                    socket.close(None).await.unwrap();
+                }
+            });
+            let transport = WebSocketTransport::new(&format!("ws://{address}/ws"))
+                .await
+                .unwrap();
+            transport
+                .authenticate(&AuthContext::anonymous([0; 16].into()))
+                .await
+                .unwrap();
+            for _ in 0..2 {
+                let result = timeout(
+                    Duration::from_secs(2),
+                    transport.send_request(DbRequest {
+                        request_id: "read-after-close".into(),
+                        ..Default::default()
+                    }),
+                )
+                .await
+                .expect("closed connection must not leave requests waiting");
+                assert!(matches!(result, Err(SdkError::TransportError(_))));
+                assert!(transport.pending.lock().await.is_empty());
+            }
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_transport_closes_its_background_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = async_tungstenite::tokio::accept_async(stream)
+                .await
+                .unwrap();
+            let result = socket.next().await;
+            assert!(result.is_none() || result.unwrap().is_err());
+        });
+        let transport = WebSocketTransport::new(&format!("ws://{address}/ws"))
+            .await
+            .unwrap();
+        transport
+            .authenticate(&AuthContext::anonymous([0; 16].into()))
+            .await
+            .unwrap();
+        drop(transport);
+        timeout(Duration::from_secs(2), server)
+            .await
+            .expect("replacing a transport must close its old socket")
+            .unwrap();
     }
 }

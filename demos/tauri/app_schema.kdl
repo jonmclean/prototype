@@ -126,7 +126,7 @@ table "inodes" {
     column "file_hash" type="fileref"
 
     rules {
-        only_via_actions write "add_inode" "move_inode" "rename_inode"
+        only_via_actions write "add_inode" "move_inode" "rename_inode" "write_inode"
 
         // Inodes form a tree.  parent_id == 0 is the root; otherwise
         // the parent must be an existing folder (type == 2) and an
@@ -150,6 +150,11 @@ table "inodes" {
         // since parent_id isn't touched.
         action "rename_inode" {
             update cols="name,mtime"
+        }
+
+        action "write_inode" {
+            assert "exists(inodes, row.id == self.id && row.type == 1)"
+            update cols="file_hash,size,mtime"
         }
     }
 }

@@ -19,7 +19,9 @@
     <string name="view_source">View source</string>
     <string name="view_rendered">Rendered</string>
     <string name="close_preview">Close</string>
-    <string name="warning">Research demo. Import trusted invitations only. File contents stay in memory and are never saved locally.</string>
+    <string name="warning">Research demo. Import trusted invitations only. Connect here to enable Encrypted Spaces in the system file picker. Other apps can read and save cloud files you select, and may keep their own copies.</string>
+    <string name="provider_sign_in">Open Spaces Files and connect to a space first.</string>
+    <string name="provider_wrong_account">This document belongs to a different space or member. Select it again in the file picker.</string>
     <string name="endpoint_hint">wss://storage.example.org/ws</string>
     <string name="import_invitation">Import invitation</string>
     <string name="endpoint_required">Enter the server WebSocket address before importing an invitation.</string>

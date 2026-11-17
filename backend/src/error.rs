@@ -19,6 +19,8 @@ pub struct StateDivergence {
 #[derive(Debug)]
 pub enum SdkError {
     DatabaseError(String),
+    /// Connection failure. A mutating request may already have reached the server.
+    TransportError(String),
     SerializationError(String),
     ValidationError(String),
     AccessDenied(String),
@@ -61,6 +63,7 @@ impl fmt::Display for SdkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SdkError::DatabaseError(msg) => write!(f, "Database error: {msg}"),
+            SdkError::TransportError(msg) => write!(f, "Transport error: {msg}"),
             SdkError::SerializationError(msg) => write!(f, "Serialization error: {msg}"),
             SdkError::ValidationError(msg) => write!(f, "Validation error: {msg}"),
             SdkError::AccessDenied(msg) => write!(f, "Access denied: {msg}"),

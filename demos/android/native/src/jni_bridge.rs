@@ -32,6 +32,26 @@ enum Request {
     Read {
         id: i64,
     },
+    Stat {
+        id: i64,
+    },
+    Create {
+        parent_id: i64,
+        name: String,
+        mime_type: String,
+    },
+    Write {
+        id: i64,
+        base64: String,
+        expected_hash: String,
+    },
+    Rename {
+        id: i64,
+        name: String,
+    },
+    Delete {
+        id: i64,
+    },
     SetUserName {
         user_name: String,
     },
@@ -90,14 +110,47 @@ fn execute(request: Request) -> Result<Value> {
                     Ok(Value::Null)
                 }
                 request => {
-                    let client = client.as_mut().context("Connect to a space first")?;
+                    let client = client.as_mut().ok_or_else(|| {
+                        encrypted_spaces_sdk::SdkErrorType::TransportError(
+                            "Connect to a space first".into(),
+                        )
+                    })?;
                     match request {
                         Request::List { parent_id } => {
                             Ok(serde_json::to_value(client.list(parent_id).await?)?)
                         }
                         Request::Read { id } => {
-                            let bytes = client.read(id).await?;
-                            Ok(json!({"base64": STANDARD.encode(bytes)}))
+                            let (inode, bytes) = client.read_version(id).await?;
+                            Ok(json!({"base64": STANDARD.encode(bytes), "inode": inode}))
+                        }
+                        Request::Stat { id } => Ok(serde_json::to_value(client.stat(id).await?)?),
+                        Request::Create {
+                            parent_id,
+                            name,
+                            mime_type,
+                        } => Ok(serde_json::to_value(
+                            client.create(parent_id, &name, &mime_type).await?,
+                        )?),
+                        Request::Write {
+                            id,
+                            base64,
+                            expected_hash,
+                        } => {
+                            anyhow::ensure!(
+                                base64.len() <= (crate::MAX_READ_BYTES as usize).div_ceil(3) * 4,
+                                "Files are limited to 32 MiB"
+                            );
+                            let bytes = STANDARD.decode(base64).context("Invalid file encoding")?;
+                            Ok(serde_json::to_value(
+                                client.write(id, bytes, &expected_hash).await?,
+                            )?)
+                        }
+                        Request::Rename { id, name } => {
+                            Ok(serde_json::to_value(client.rename(id, &name).await?)?)
+                        }
+                        Request::Delete { id } => {
+                            client.delete(id).await?;
+                            Ok(Value::Null)
                         }
                         Request::Snapshot => Ok(serde_json::to_value(client.snapshot().await?)?),
                         Request::SetUserName { user_name } => {
@@ -110,7 +163,7 @@ fn execute(request: Request) -> Result<Value> {
             }
         })
         .await
-        .context("Remote operation timed out; reconnect and retry")?
+        .context("Remote operation timed out; changes may already have been applied")?
     })
 }
 
@@ -129,7 +182,11 @@ pub extern "system" fn Java_org_encryptedspaces_android_NativeBridge_request(
         Ok(Ok(data)) => json!({"ok": true, "data": data}),
         Ok(Err(error)) => {
             diagnostics::log_failure("SDK request failed", &error);
-            json!({"ok": false, "error": format!("{error:#}")})
+            json!({
+                "ok": false,
+                "error": format!("{error:#}"),
+                "transport_failure": crate::is_transport_failure(&error),
+            })
         }
         Err(_) => json!({"ok": false, "error": "SDK panicked; restart the app before retrying"}),
     };

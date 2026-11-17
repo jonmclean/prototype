@@ -13,9 +13,7 @@ import android.provider.Settings
 import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.text.format.Formatter
-import android.util.AtomicFile
 import android.util.Base64
-import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.view.Gravity
@@ -24,7 +22,6 @@ import android.widget.*
 import io.noties.markwon.Markwon
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
 import java.io.ByteArrayOutputStream
 import java.security.KeyStore
 import java.security.cert.CertificateFactory
@@ -54,7 +51,7 @@ class MainActivity : Activity() {
     private var networkPermissionDialog: AlertDialog? = null
     private var userNameDialog: AlertDialog? = null
     private var pendingNetworkAction: (() -> Unit)? = null
-    private val snapshotFile get() = AtomicFile(File(noBackupFilesDir, "invited-connection.json"))
+    private val snapshotFile get() = CloudSession.file(this)
     private val markdown by lazy { Markwon.create(this) }
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
@@ -137,7 +134,6 @@ class MainActivity : Activity() {
         forget = button(trustRow, R.string.forget) {
             operation {
                 native(JSONObject().put("command", "disconnect"))
-                snapshotFile.delete()
                 extraCertificates = emptyList()
                 runOnUiThread {
                     connected = false
@@ -356,13 +352,11 @@ class MainActivity : Activity() {
             certificates.put(Base64.encodeToString(keyStore.getCertificate(alias).encoded, Base64.NO_WRAP))
         }
         extraCertificates.forEach { certificates.put(it) }
-        val snapshot = native(request
+        native(request
             .put("address", endpoint)
-            .put("certificates", certificates)) as JSONObject
+            .put("certificates", certificates))
         // Persist rotated invitation credentials before a profile update can fail.
-        saveSnapshot(snapshot)
-        saveSnapshot(native(JSONObject().put("command", "set_user_name")
-            .put("user_name", userName)) as JSONObject)
+        native(JSONObject().put("command", "set_user_name").put("user_name", userName))
         runOnUiThread {
             address.setText(endpoint)
             connected = true
@@ -375,7 +369,6 @@ class MainActivity : Activity() {
         val result = native(JSONObject()
             .put("command", "list")
             .put("parent_id", path.last().first)) as JSONArray
-        saveSnapshot(native(JSONObject().put("command", "snapshot")) as JSONObject)
         val loaded = (0 until result.length()).map { result.getJSONObject(it) }
             .sortedWith(compareBy<JSONObject> { it.getInt("type") != 2 }
                 .thenBy { it.getString("name").lowercase(Locale.ROOT) }
@@ -394,7 +387,6 @@ class MainActivity : Activity() {
         val result = native(JSONObject()
             .put("command", "read")
             .put("id", entry.getLong("id"))) as JSONObject
-        saveSnapshot(native(JSONObject().put("command", "snapshot")) as JSONObject)
         val bytes = Base64.decode(result.getString("base64"), Base64.DEFAULT)
         runOnUiThread {
             if (isFinishing || isDestroyed) {
@@ -531,22 +523,7 @@ class MainActivity : Activity() {
         else -> R.string.file_type
     }
 
-    private fun native(request: JSONObject): Any {
-        val response = JSONObject(NativeBridge.request(request.toString()))
-        check(response.getBoolean("ok")) { response.getString("error") }
-        return response.get("data")
-    }
-
-    private fun saveSnapshot(snapshot: JSONObject) {
-        val output = snapshotFile.startWrite()
-        try {
-            output.write(snapshot.toString().toByteArray(Charsets.UTF_8))
-            snapshotFile.finishWrite(output)
-        } catch (error: Exception) {
-            snapshotFile.failWrite(output)
-            throw error
-        }
-    }
+    private fun native(request: JSONObject): Any = CloudSession.request(this, request)
 
     private fun networkOperation(action: () -> Unit) {
         if (busy || pendingNetworkAction != null) return
@@ -615,17 +592,7 @@ class MainActivity : Activity() {
     }
 
     private fun showError(error: Exception) {
-        Log.e("SpacesAndroid", "Android operation failed:")
-        // Log's Throwable overload omits UnknownHostException and can truncate long traces.
-        error.stackTraceToString().lineSequence().forEach { line ->
-            var start = 0
-            do {
-                var end = minOf(start + 1000, line.length)
-                if (end < line.length && line[end - 1].isHighSurrogate()) end--
-                Log.e("SpacesAndroid", line.substring(start, end))
-                start = end
-            } while (start < line.length)
-        }
+        logException("SpacesAndroid", "Android operation failed:", error)
         status.text = getString(R.string.error, error.message ?: error.javaClass.simpleName)
     }
 

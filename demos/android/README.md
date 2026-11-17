@@ -3,7 +3,9 @@
 A native Kotlin Android client with a Rust JNI bridge to `encrypted-spaces-sdk`.
 It joins an existing Encrypted Spaces server using an invitation, lists the desktop demo's
 `inodes` table, browses folders, and reads/decrypts files **in memory only**.
-There is no embedded server, file upload/edit/delete API, or prover.
+Its Android `DocumentsProvider` also lets other apps create, edit, rename, and delete
+cloud files through the system file picker using the encrypted-spaces SDK.
+There is no embedded server or prover.
 
 **Research demo, not production software.** The repository's authentication and
 default fake fast-forward-proof limitations still apply. The SDK verifies table
@@ -118,7 +120,7 @@ only this app's privately saved `invited-connection.json` in no-backup storage.
 Legacy `connection.json` files from the snapshot-import version are not restored;
 join again with a fresh invitation. The SDK's transient table cache is not
 serialized. Android publishes the chosen display name to the connected member's
-`users_meta` row, but does not create channels or modify files. The invitation
+`users_meta` row, but does not create channels. The invitation
 still determines the member identity; entering a name does not select another
 account. Joining updates the invited member's authentication/key state on the
 server. New credentials are saved before publishing the name, so a failed name
@@ -127,7 +129,10 @@ update can be retried with **Reconnect** without reusing a consumed invitation.
 ### No decrypted files on disk
 
 Reading returns bytes from the SDK to JNI/Kotlin memory. There is **no plaintext
-file cache, export/save action, share action, or clipboard-copy action**.
+file cache, preview export/save action, share action, or clipboard-copy action**.
+The documents provider explicitly grants other apps access to files selected through
+Android's picker. Those apps receive plaintext and **may save their own copies**;
+the preview's restrictions do not extend to other apps.
 Screenshots and recent-task captures are blocked with `FLAG_SECURE`. Byte buffers
 are cleared when closing the preview, but managed/native allocators can retain
 transient copies in RAM; this is not a guarantee of forensic memory erasure.
@@ -137,6 +142,52 @@ checks the decrypted length against that metadata. Text previews show the first
 256 KiB, and images are downsampled to at most 2048 pixels on either axis.
 The SDK currently buffers a whole ciphertext response, so the size limit is not
 a hardened defense against an untrusted oversized HTTP response.
+
+### Android system file picker
+
+1. Connect in **Spaces Files** using the existing invitation/name flow above.
+2. In another app, choose **Open**, **Save as**, or a folder picker and select
+   **Encrypted Spaces** in Android's storage locations.
+3. Browse/open cloud files, create files/folders, save edits, rename entries, or
+   delete files/folders. Deleting a folder recursively deletes its descendants.
+
+The provider uses the same invited member and private reconnect state as the
+application; it does not have a separate login. It restores that connection on
+demand after process restart. If disconnected, open Spaces Files to connect.
+If a listing, metadata lookup, or file download fails because the transport closed
+or the native request timed out (60 seconds), it restores the saved login and retries
+that read once. Permission, validation, and verification errors are not retried.
+Writes and other mutations are never replayed automatically; a failed write may
+already have reached the server. Recovery attempts are logged under `SpacesDocuments`.
+For local-network storage, grant nearby-device access in Spaces Files first.
+Automatic reconnects retain the current session's TLS certificates in memory.
+Development certificates must be reimported and applied with
+**Reconnect** after process restart before the provider can reach that server.
+
+Document IDs are scoped to both space and member. **Forget space** revokes URI
+grants, removes saved credentials, and prevents further reads/writes through
+already-open descriptors. Android's standard document permissions restrict other
+apps to documents or trees selected by the user.
+
+Descriptors support seeking, overwrites, append, and truncation in RAM, up to
+32 MiB per file. Each successful write encrypts/uploads the entire current file
+and updates its verified inode through the SDK before returning to the editor;
+there is no deferred upload or plaintext staging file. This favors explicit
+save errors over performance and is intended for small demo documents, not
+large or write-intensive workloads. Network, permission, and size-limit errors
+are returned to the calling app and logged under `SpacesDocuments`/`SpacesNative`.
+Writes reject a content hash that changed since the descriptor's previous
+read/write; this is a stale-edit check, not a server-side compare-and-swap
+guarantee against simultaneous remote writers. Offline operations fail rather
+than queueing writes. Recursive deletion is not transactional and can partially
+complete if an operation fails.
+
+**Deployment compatibility:** editing requires the `write_inode` action in the
+updated `demos/tauri/app_schema.kdl`. This changes the initial schema commitment;
+existing spaces are not automatically migrated. Use a newly created space on a
+server configured with this schema and issue fresh invitations. Rebuild both
+desktop/Android clients so their embedded schema and trust anchors agree.
+Old spaces without the action cannot save edits.
 
 ### TLS and local testing
 
@@ -168,6 +219,18 @@ cargo run -p encrypted-spaces-backend-server -- \
 
 ## Error diagnostics
 
+The documents provider logs under `SpacesDocuments` at info priority. Requests
+include a request number, operation, caller UID, inode number (without the
+account scope), timing, and success/failure/cancellation. Metadata logs include
+the MIME type, size, and capability flags, but not file names or contents.
+Opening a file logs connection readiness, download completion, proxy descriptor
+creation, and subsequent size/read/write/fsync/release callbacks. Callback logs
+retain the opening request number and include byte counts, offsets, and errors
+with stack traces. This distinguishes failure inside our provider from a
+viewer/platform failure: no open request means the failure happened before
+reaching `openDocument`/`openTypedDocument`; successful reads show that bytes
+were delivered, not that the viewer successfully rendered them.
+
 All exceptions handled by the Kotlin UI are logged at error priority under the
 `SpacesAndroid` tag, including their stack traces, causes, and suppressed exceptions.
 This covers startup state loading, document/certificate imports, worker operations,
@@ -180,8 +243,8 @@ SDK/JNI failures are logged at error priority under the `SpacesNative` tag,
 including the complete error cause chain and Rust backtrace. Backtrace capture
 is enabled before the native library is loaded. Panics are logged before stack
 unwinding, with their message, source location, and stack. Long diagnostics are
-split across log entries to avoid Logcat's per-entry truncation. The UI error
-message and JNI response format are unchanged.
+split across log entries to avoid Logcat's per-entry truncation. JNI errors retain
+the human-readable message and include a `transport_failure` flag for read recovery.
 
 Join and reconnect attempts log the configured WebSocket endpoint (scheme,
 host, effective port, and path) at info priority under the same tag. Credentials,
@@ -189,7 +252,7 @@ query parameters, and fragments are excluded. This is the configured destination
 not the DNS-resolved IP address.
 
 ```bash
-adb logcat 'SpacesNative:I' 'SpacesAndroid:E' 'AndroidRuntime:E' '*:S'
+adb logcat 'SpacesDocuments:I' 'SpacesNative:I' 'SpacesAndroid:E' 'AndroidRuntime:E' '*:S'
 ```
 
 Rebuild and reinstall the APK after changing native code or packaging settings.
@@ -265,7 +328,13 @@ not supplied. Generate a fresh invitation with `seed_remote` before each run.
 It joins through the invitation document-import flow, reconnects using the
 resulting private connection state, and compares app-private files before and
 after SDK reads. The UI preview test also checks that previews create no local files and that
-screenshots are blocked. To exercise TLS, start a separate TLS server, pass a
+screenshots are blocked. The remote test also exercises the registered documents
+provider through `ContentResolver`: automatic reconnect from saved credentials
+without an active native client (unless a session-only certificate is supplied),
+folder/file creation, seekable edits, append, truncation, stable-ID rename,
+stale-write rejection, recursive deletion, and
+revocation of an open descriptor on **Forget space**. This consumes the saved
+test connection. To exercise TLS, start a separate TLS server, pass a
 public PEM/DER certificate as the optional final argument to `seed_remote`,
 and supply `remoteAddress=wss://10.0.2.2:PORT/ws` and
 `remoteTrustCert=/data/local/tmp/public-cert.pem` runner arguments. Its SAN must
