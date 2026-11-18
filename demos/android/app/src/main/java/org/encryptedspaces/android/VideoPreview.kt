@@ -58,7 +58,7 @@ internal class VideoPreview(
     private val source = MemoryMediaDataSource(bytes)
     private val player = MediaPlayer()
     private val handler = Handler(Looper.getMainLooper())
-    private val surface = SurfaceView(context).apply { setSecure(true) }
+    private val surface = SurfaceView(context).apply { setSecure(AppConfig.blockScreenCapture(context)) }
     private val message = TextView(context).apply {
         setText(R.string.video_loading)
         setTextColor(Color.WHITE)

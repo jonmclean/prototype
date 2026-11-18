@@ -1,5 +1,8 @@
 <resources>
     <string name="app_name">Spaces Files</string>
+    <string name="preferences_title">Spaces Files settings</string>
+    <string name="block_screen_capture_title">Block screenshots and screen recording</string>
+    <string name="block_screen_capture_description">Protects app screens and file previews from screenshots, screen recording, and recent-app thumbnails. Enabled by default. Turning this off may expose decrypted content. Changing this setting closes an open video preview when you return to the app.</string>
     <string name="files_title">Files</string>
     <string name="space_brand">Encrypted Spaces</string>
     <string name="connection">Connection</string>

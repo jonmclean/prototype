@@ -20,6 +20,15 @@
             </intent-filter>
         </provider>
         <activity
+            android:name=".PreferencesActivity"
+            android:label="@string/preferences_title"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.APPLICATION_PREFERENCES" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+        <activity
             android:name=".MainActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize">

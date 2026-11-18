@@ -5,6 +5,7 @@ import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.view.WindowManager
 import android.widget.TextView
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -64,6 +65,7 @@ class NetworkPermissionTest {
             )
             val dialog = permissionDialog(activity)
             assertTrue(dialog.isShowing)
+            assertTrue(dialog.window!!.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0)
             assertEquals(1L, completed.count)
             assertEquals(
                 activity.getString(R.string.local_network_denied),

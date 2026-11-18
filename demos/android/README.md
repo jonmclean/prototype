@@ -147,7 +147,15 @@ file cache, preview export/save action, share action, or clipboard-copy action**
 The documents provider explicitly grants other apps access to files selected through
 Android's picker. Those apps receive plaintext and **may save their own copies**;
 the preview's restrictions do not extend to other apps.
-Screenshots and recent-task captures are blocked with `FLAG_SECURE`. Byte buffers
+Screenshots and recent-task captures are blocked with `FLAG_SECURE`.
+The **Block screenshots and screen recording** preference controls capture protection
+for the activity, app dialogs, and video surface. It defaults to enabled and is
+saved privately through `AppConfig`. The settings screen is registered with
+`ACTION_APPLICATION_PREFERENCES`; supporting Android devices may show a link in
+App info, but this entry is device-dependent. The screen describes the setting
+and warns that disabling it can expose decrypted content. Changes apply when
+returning to the app; an open video preview closes so its surface can be recreated
+with the new policy. No rebuild is needed. Byte buffers
 are cleared when closing the preview, but managed/native allocators can retain
 transient copies in RAM; this is not a guarantee of forensic memory erasure.
 

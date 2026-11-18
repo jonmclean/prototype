@@ -64,6 +64,7 @@ class MainActivity : Activity() {
     private var extraCertificates = emptyList<String>()
     private var previewDialog: AlertDialog? = null
     private var previewVideo: VideoPreview? = null
+    private var blockScreenCapture = true
     private var networkPermissionDialog: AlertDialog? = null
     private var userNameDialog: AlertDialog? = null
     private var pendingNetworkAction: (() -> Unit)? = null
@@ -73,7 +74,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        blockScreenCapture = AppConfig.blockScreenCapture(this)
+        AppConfig.applyScreenCapturePolicy(window)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             val inset = dp(12)
@@ -336,9 +338,8 @@ class MainActivity : Activity() {
             if (userNameDialog === dialog) userNameDialog = null
             updateControls()
         }
-        dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        AppConfig.applyScreenCapturePolicy(checkNotNull(dialog.window))
         dialog.show()
-        dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             val userName = name.text.toString().trim()
             if (userName.isEmpty()) {
@@ -564,9 +565,8 @@ class MainActivity : Activity() {
                 releaseImage?.invoke()
                 if (previewDialog === this) previewDialog = null
             }
-            window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            AppConfig.applyScreenCapturePolicy(checkNotNull(window))
             show()
-            window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
             window?.setLayout(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT
@@ -670,6 +670,7 @@ class MainActivity : Activity() {
                 networkPermissionDialog = null
                 updateControls()
             }
+            AppConfig.applyScreenCapturePolicy(checkNotNull(dialog.window))
             dialog.show()
         }
     }
@@ -765,6 +766,18 @@ class MainActivity : Activity() {
         forget.isEnabled = available && (connected || snapshotFile.baseFile.exists())
         refresh.isEnabled = available && connected
         up.isEnabled = available && connected && folders.size > 1
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val enabled = AppConfig.blockScreenCapture(this)
+        // A SurfaceView's secure setting must be chosen before attaching its window.
+        if (enabled != blockScreenCapture && previewVideo != null) previewDialog?.dismiss()
+        blockScreenCapture = enabled
+        AppConfig.applyScreenCapturePolicy(window)
+        listOf(previewDialog, userNameDialog, networkPermissionDialog).forEach { dialog ->
+            dialog?.window?.let { AppConfig.applyScreenCapturePolicy(it) }
+        }
     }
 
     override fun onStop() {
