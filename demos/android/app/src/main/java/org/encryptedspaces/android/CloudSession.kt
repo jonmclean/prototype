@@ -35,8 +35,10 @@ internal object CloudSession {
             Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
     }
 
-    private fun native(request: JSONObject): Any {
-        val response = JSONObject(NativeBridge.request(request.toString()))
+    private fun native(request: JSONObject, progress: NativeBridge.DownloadProgress? = null): Any {
+        val response = JSONObject(if (progress == null) NativeBridge.request(request.toString()) else {
+            NativeBridge.requestWithProgress(request.toString(), progress)
+        })
         if (!response.getBoolean("ok")) {
             val transportFailure = response.optBoolean("transport_failure")
             if (transportFailure) connected = false
@@ -77,7 +79,9 @@ internal object CloudSession {
         }
     }
 
-    fun request(context: Context, request: JSONObject): Any = synchronized(lock) {
+    fun request(
+        context: Context, request: JSONObject, progress: NativeBridge.DownloadProgress? = null
+    ): Any = synchronized(lock) {
         val command = request.getString("command")
         if (command == "join" || command == "restore" || command == "disconnect") {
             connected = false
@@ -89,7 +93,7 @@ internal object CloudSession {
             }
             notifyRoots(context)
         }
-        val result = recoverRead(command, { native(request) }) {
+        val result = recoverRead(command, { native(request, progress) }) {
             val connection = saved(context) ?: error(context.getString(R.string.provider_sign_in))
             restoreConnection(context, connection)
         }

@@ -10,4 +10,10 @@ object NativeBridge {
     }
 
     @JvmStatic external fun request(request: String): String
+
+    fun interface DownloadProgress {
+        fun onProgress(stage: String, processed: Long, total: Long, complete: Boolean)
+    }
+
+    @JvmStatic external fun requestWithProgress(request: String, listener: DownloadProgress): String
 }

@@ -1,7 +1,7 @@
 use crate::Space;
 use encrypted_spaces_backend::error::{Result, SdkError};
 use encrypted_spaces_crypto::encryption::{
-    ciphertext_key_id, decrypt_field, encrypt_field, EncryptionKey,
+    ciphertext_key_id, decrypt_field_with_progress, encrypt_field, EncryptionKey,
 };
 use encrypted_spaces_key_manager::SimpleKeyId;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -111,6 +111,27 @@ pub struct FileHandle {
     pub(crate) space: Arc<Space>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileStage {
+    Preparing,
+    Downloading,
+    Verifying,
+    RetrievingKey,
+    Decrypting,
+}
+
+/// Progress is stage-local. A byte count reaching its total does not mark a
+/// stage successful; `complete` is emitted only after that stage succeeds.
+#[derive(Clone, Copy, Debug)]
+pub struct FileProgress {
+    pub stage: FileStage,
+    pub processed: u64,
+    pub total: Option<u64>,
+    pub complete: bool,
+}
+
+pub type FileProgressCallback<'a> = dyn Fn(FileProgress) -> Result<()> + Send + Sync + 'a;
+
 impl FileHandle {
     /// Encrypt and upload a file's data. Takes a `File::Data` and returns
     /// a `File::Hash` with the content hash. No-op if already a `File::Hash`.
@@ -130,21 +151,98 @@ impl FileHandle {
     /// a `File::Data` with the decrypted content. Returns a clone if
     /// the file already contains data.
     pub async fn download(&self, file: &File) -> Result<File> {
+        self.download_with_progress(file, &|_, _| Ok(())).await
+    }
+
+    /// Download, verify, and decrypt a file while reporting ciphertext transfer
+    /// progress. The byte total can be unknown; a completed transfer does not
+    /// imply that verification or decryption has succeeded.
+    pub async fn download_with_progress(
+        &self,
+        file: &File,
+        progress: &crate::transport::DownloadProgress<'_>,
+    ) -> Result<File> {
+        if let File::Data(d) = file {
+            progress(d.len() as u64, Some(d.len() as u64))?;
+            return Ok(File::Data(d.clone()));
+        }
+        self.download_with_stages(file, &|event| {
+            if event.stage == FileStage::Downloading && !event.complete {
+                progress(event.processed, event.total)?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    /// Download with separate transfer, integrity verification, key retrieval,
+    /// and decryption stages. Plaintext is returned only after all succeed.
+    pub async fn download_with_stages(
+        &self,
+        file: &File,
+        progress: &FileProgressCallback<'_>,
+    ) -> Result<File> {
         if let File::Data(d) = file {
             return Ok(File::Data(d.clone()));
         }
         let hash = file.hash()?;
-        let encrypted = self.space.transport.file_download(hash).await?;
+        progress(FileProgress {
+            stage: FileStage::Downloading,
+            processed: 0,
+            total: None,
+            complete: false,
+        })?;
+        let encrypted = self
+            .space
+            .transport
+            .file_download_with_progress(hash, &|processed, total| {
+                progress(FileProgress {
+                    stage: FileStage::Downloading,
+                    processed,
+                    total,
+                    complete: false,
+                })
+            })
+            .await?;
+        let report = |stage, processed: usize, total: usize, complete| {
+            progress(FileProgress {
+                stage,
+                processed: processed as u64,
+                total: Some(total as u64),
+                complete,
+            })
+        };
+        report(
+            FileStage::Downloading,
+            encrypted.len(),
+            encrypted.len(),
+            true,
+        )?;
         // The server is untrusted: verify the content hash before decrypting.
         // Files are content-addressed by sha256(ciphertext), and encrypt_field
         // uses AES-256-CTR (no MAC), so without this check a malicious server
         // could flip arbitrary plaintext bits. The hash is committed in the
         // changelog Merkle tree, so this re-derivation is the integrity anchor.
-        if hex::encode(Sha256::digest(&encrypted)) != hash {
+        report(FileStage::Verifying, 0, encrypted.len(), false)?;
+        let mut hasher = Sha256::new();
+        let mut processed = 0;
+        for chunk in encrypted.chunks(256 * 1024) {
+            hasher.update(chunk);
+            processed += chunk.len();
+            report(FileStage::Verifying, processed, encrypted.len(), false)?;
+        }
+        if hex::encode(hasher.finalize()) != hash {
             return Err(SdkError::DecryptionError(
                 "file content hash mismatch: server returned tampered or wrong data".into(),
             ));
         }
+        report(FileStage::Verifying, encrypted.len(), encrypted.len(), true)?;
+        progress(FileProgress {
+            stage: FileStage::RetrievingKey,
+            processed: 0,
+            total: None,
+            complete: false,
+        })?;
         let key_id: SimpleKeyId = ciphertext_key_id(&encrypted).ok_or_else(|| {
             SdkError::DecryptionError("invalid file ciphertext: missing key_id".into())
         })?;
@@ -155,8 +253,24 @@ impl FileHandle {
             .await
             .map(|bytes| EncryptionKey::new(bytes, &key_id))
             .map_err(|_| SdkError::DecryptionError(format!("missing key for key_id {key_id:?}")))?;
-        let plaintext = decrypt_field(&encrypted, &key)
-            .map_err(|e| SdkError::DecryptionError(e.to_string()))?;
+        progress(FileProgress {
+            stage: FileStage::RetrievingKey,
+            processed: 0,
+            total: None,
+            complete: true,
+        })?;
+        let plaintext = decrypt_field_with_progress(&encrypted, &key, |processed, total| {
+            report(FileStage::Decrypting, processed, total, false).map_err(|error| {
+                encrypted_spaces_crypto::error::EncryptionError::Progress(error.to_string())
+            })
+        })
+        .map_err(|error| SdkError::DecryptionError(error.to_string()))?;
+        report(
+            FileStage::Decrypting,
+            plaintext.len(),
+            plaintext.len(),
+            true,
+        )?;
         Ok(File::Data(plaintext))
     }
 }
@@ -201,6 +315,95 @@ mod tests {
         let uploaded = handle.upload(File::from_data(data.clone())).await?;
         let downloaded = handle.download(&uploaded).await?;
         assert_eq!(downloaded.data()?, &data);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn staged_download_reports_independent_byte_progress_and_success() -> Result<()> {
+        let space = create_space().await?;
+        let handle = space.file();
+        for size in [0, 512 * 1024 + 17] {
+            let data = vec![42; size];
+            let uploaded = handle.upload(File::from_data(data.clone())).await?;
+            let updates = std::sync::Mutex::new(Vec::new());
+            let downloaded = handle
+                .download_with_stages(&uploaded, &|event| {
+                    updates.lock().unwrap().push(event);
+                    Ok(())
+                })
+                .await?;
+            assert_eq!(downloaded.data()?, data);
+            let updates = updates.into_inner().unwrap();
+            let completed: Vec<_> = updates
+                .iter()
+                .filter(|event| event.complete)
+                .map(|event| event.stage)
+                .collect();
+            assert_eq!(
+                completed,
+                vec![
+                    FileStage::Downloading,
+                    FileStage::Verifying,
+                    FileStage::RetrievingKey,
+                    FileStage::Decrypting
+                ]
+            );
+            for stage in [FileStage::Verifying, FileStage::Decrypting] {
+                let events: Vec<_> = updates
+                    .iter()
+                    .filter(|event| event.stage == stage)
+                    .collect();
+                assert_eq!(events[0].processed, 0);
+                let last = events.last().unwrap();
+                assert!(last.complete);
+                assert_eq!(last.total, Some(last.processed));
+                assert!(events[..events.len() - 1]
+                    .iter()
+                    .all(|event| !event.complete));
+                if size > 0 {
+                    assert!(events
+                        .iter()
+                        .any(|event| event.processed > 0 && Some(event.processed) < event.total));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn staged_download_does_not_decrypt_or_complete_verification_after_tampering(
+    ) -> Result<()> {
+        use crate::Transport;
+        let space = create_space().await?;
+        let handle = space.file();
+        let file = handle.upload(File::from_data(vec![42; 512 * 1024])).await?;
+        let transport = space
+            .transport
+            .as_any()
+            .downcast_ref::<LocalTransport>()
+            .unwrap();
+        let mut encrypted = transport.file_download(file.hash()?).await?;
+        *encrypted.last_mut().unwrap() ^= 1;
+        transport.file_upload(file.hash()?, encrypted).await?;
+        let updates = std::sync::Mutex::new(Vec::new());
+        let result = handle
+            .download_with_stages(&file, &|event| {
+                updates.lock().unwrap().push(event);
+                Ok(())
+            })
+            .await;
+        assert!(matches!(result, Err(SdkError::DecryptionError(_))));
+        let updates = updates.into_inner().unwrap();
+        assert!(updates
+            .iter()
+            .any(|event| event.stage == FileStage::Downloading && event.complete));
+        assert!(!updates
+            .iter()
+            .any(|event| event.stage == FileStage::Verifying && event.complete));
+        assert!(!updates.iter().any(|event| matches!(
+            event.stage,
+            FileStage::RetrievingKey | FileStage::Decrypting
+        )));
         Ok(())
     }
 

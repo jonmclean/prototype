@@ -374,13 +374,34 @@ impl Client {
     }
 
     pub async fn read_version(&self, id: i64) -> Result<(Inode, Vec<u8>)> {
+        self.read_version_with_progress(id, &|_| Ok(())).await
+    }
+
+    pub async fn read_version_with_progress(
+        &self,
+        id: i64,
+        progress: &encrypted_spaces_sdk::file::FileProgressCallback<'_>,
+    ) -> Result<(Inode, Vec<u8>)> {
+        use encrypted_spaces_sdk::file::{FileProgress, FileStage};
+        progress(FileProgress {
+            stage: FileStage::Preparing,
+            processed: 0,
+            total: None,
+            complete: false,
+        })?;
         self.space.sync().await?;
         let inode = self.inode(id).await?;
         validate_read(&inode)?;
+        progress(FileProgress {
+            stage: FileStage::Preparing,
+            processed: 0,
+            total: None,
+            complete: true,
+        })?;
         let bytes = self
             .space
             .file()
-            .download(&inode.file_hash)
+            .download_with_stages(&inode.file_hash, progress)
             .await
             .context("Cannot download or decrypt file")?
             .into_data()?;
@@ -490,6 +511,37 @@ mod tests {
         assert_eq!(
             client.read(file.id).await.unwrap(),
             b"encrypted cloud content"
+        );
+        let updates = std::sync::Mutex::new(Vec::new());
+        let (inode, bytes) = client
+            .read_version_with_progress(file.id, &|event| {
+                updates.lock().unwrap().push(event);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(inode.id, file.id);
+        assert_eq!(bytes, b"encrypted cloud content");
+        let updates = updates.into_inner().unwrap();
+        use encrypted_spaces_sdk::file::FileStage;
+        assert_eq!(updates.first().unwrap().stage, FileStage::Preparing);
+        assert!(!updates.first().unwrap().complete);
+        assert_eq!(updates.last().unwrap().stage, FileStage::Decrypting);
+        assert!(updates.last().unwrap().complete);
+        let completed: Vec<_> = updates
+            .iter()
+            .filter(|event| event.complete)
+            .map(|event| event.stage)
+            .collect();
+        assert_eq!(
+            completed,
+            vec![
+                FileStage::Preparing,
+                FileStage::Downloading,
+                FileStage::Verifying,
+                FileStage::RetrievingKey,
+                FileStage::Decrypting
+            ]
         );
         assert!(!serde_json::to_string(&client.snapshot().await.unwrap())
             .unwrap()

@@ -14,7 +14,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::error::EncryptionError;
 
@@ -89,6 +89,16 @@ pub fn encrypt_field(plaintext: &[u8], key: &EncryptionKey) -> Vec<u8> {
 ///
 /// CTR mode is symmetric — encryption and decryption are the same operation.
 pub fn decrypt_field(data: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, EncryptionError> {
+    decrypt_field_with_progress(data, key, |_, _| Ok(()))
+}
+
+/// Decrypt with byte progress, retaining one CTR state across chunks. Callback
+/// errors abort the operation and clear any partially decrypted buffer.
+pub fn decrypt_field_with_progress(
+    data: &[u8],
+    key: &EncryptionKey,
+    mut progress: impl FnMut(usize, usize) -> Result<(), EncryptionError>,
+) -> Result<Vec<u8>, EncryptionError> {
     if data.len() < MIN_HEADER_LEN {
         return Err(EncryptionError::InvalidCiphertext);
     }
@@ -108,11 +118,18 @@ pub fn decrypt_field(data: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, Encryp
     let nonce = &data[nonce_start..nonce_start + NONCE_LEN];
     let ciphertext = &data[header_len..];
 
-    let mut buffer = ciphertext.to_vec();
+    let mut buffer = Zeroizing::new(ciphertext.to_vec());
     let mut cipher = Aes256Ctr::new((&key.key).into(), nonce.into());
-    cipher.apply_keystream(&mut buffer);
+    let total = buffer.len();
+    progress(0, total)?;
+    let mut processed = 0;
+    for chunk in buffer.chunks_mut(256 * 1024) {
+        cipher.apply_keystream(chunk);
+        processed += chunk.len();
+        progress(processed, total)?;
+    }
 
-    Ok(buffer)
+    Ok(std::mem::take(&mut *buffer))
 }
 
 /// Extract and deserialize the key ID from a ciphertext header without decrypting.
@@ -263,6 +280,44 @@ mod tests {
         let encrypted = encrypt_field(data, &key);
         let decrypted = decrypt_field(&encrypted, &key).unwrap();
         assert_eq!(data.to_vec(), decrypted);
+    }
+
+    #[test]
+    fn chunked_decryption_reports_bytes_and_preserves_ctr_state() {
+        let key = test_key();
+        for size in [0, 1, 256 * 1024, 512 * 1024 + 17] {
+            let data: Vec<_> = (0..size).map(|index| (index % 251) as u8).collect();
+            let encrypted = encrypt_field(&data, &key);
+            let mut updates = Vec::new();
+            let decrypted = decrypt_field_with_progress(&encrypted, &key, |done, total| {
+                updates.push((done, total));
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(decrypted, data);
+            assert_eq!(updates.first(), Some(&(0, size)));
+            assert_eq!(updates.last(), Some(&(size, size)));
+            if size > 256 * 1024 {
+                assert!(updates.iter().any(|&(done, _)| done > 0 && done < size));
+            }
+        }
+    }
+
+    #[test]
+    fn chunked_decryption_aborts_on_progress_failure() {
+        let key = test_key();
+        let encrypted = encrypt_field(&vec![42; 512 * 1024], &key);
+        let mut updates = Vec::new();
+        let result = decrypt_field_with_progress(&encrypted, &key, |done, _| {
+            updates.push(done);
+            if done > 0 {
+                Err(EncryptionError::Progress("observer failed".into()))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(result, Err(EncryptionError::Progress(_))));
+        assert_eq!(updates, vec![0, 256 * 1024]);
     }
 
     #[test]

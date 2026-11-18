@@ -1025,6 +1025,16 @@ impl Transport for WebSocketTransport {
     }
 
     async fn file_download(&self, hash: &str) -> Result<Vec<u8>> {
+        self.file_download_with_progress(hash, &|_, _| Ok(())).await
+    }
+
+    async fn file_download_with_progress(
+        &self,
+        hash: &str,
+        progress: &crate::transport::DownloadProgress<'_>,
+    ) -> Result<Vec<u8>> {
+        use hyper::body::HttpBody;
+
         let auth_b64 = self
             .auth_b64
             .lock()
@@ -1043,14 +1053,34 @@ impl Transport for WebSocketTransport {
             .map_err(|e| SdkError::TransportError(format!("file download failed: {e}")))?;
 
         if resp.status().is_success() {
-            let bytes = hyper::body::to_bytes(resp.into_body())
-                .await
-                .map_err(|e| SdkError::TransportError(format!("file download body: {e}")))?;
-            Ok(bytes.to_vec())
+            let total = resp.body().size_hint().exact();
+            read_file_body(resp.into_body(), total, progress).await
         } else {
             Err(SdkError::DatabaseError(format!("file not found: {hash}")))
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn read_file_body(
+    mut body: hyper::Body,
+    total: Option<u64>,
+    progress: &crate::transport::DownloadProgress<'_>,
+) -> Result<Vec<u8>> {
+    use hyper::body::HttpBody;
+
+    let mut bytes = Vec::new();
+    progress(0, total)?;
+    while let Some(chunk) = body.data().await {
+        let chunk =
+            chunk.map_err(|e| SdkError::TransportError(format!("file download body: {e}")))?;
+        bytes.extend_from_slice(&chunk);
+        progress(bytes.len() as u64, total)?;
+    }
+    if total != Some(bytes.len() as u64) {
+        progress(bytes.len() as u64, Some(bytes.len() as u64))?;
+    }
+    Ok(bytes)
 }
 
 /// Convert a WebSocket URL (ws://host:port/ws) to the HTTP base URL (http://host:port).
@@ -1095,6 +1125,114 @@ mod hash_backed_change_request_tests {
 
         assert_eq!(request.retention_proofs, vec![b"proof".to_vec()]);
         assert_eq!(request.values_sidecar, vec![full_value]);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod download_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[tokio::test]
+    async fn http_download_reports_content_length_or_chunked_transfer() {
+        use hyper::service::{make_service_fn, service_fn};
+        use std::{convert::Infallible, net::TcpListener};
+
+        for known_length in [true, false] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let address = listener.local_addr().unwrap();
+            let service = make_service_fn(move |_| async move {
+                Ok::<_, Infallible>(service_fn(move |_| async move {
+                    let body = if known_length {
+                        hyper::Body::from("abcdef")
+                    } else {
+                        hyper::Body::wrap_stream(futures_util::stream::iter([
+                            Ok::<_, std::io::Error>("ab"),
+                            Ok("cde"),
+                            Ok("f"),
+                        ]))
+                    };
+                    Ok::<_, Infallible>(hyper::Response::new(body))
+                }))
+            });
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            let server = hyper::Server::from_tcp(listener).unwrap().serve(service);
+            let server = tokio::spawn(server.with_graceful_shutdown(async {
+                stopped.await.unwrap();
+            }));
+            let transport = WebSocketTransport::new(&format!("ws://{address}/ws"))
+                .await
+                .unwrap();
+            *transport.auth_b64.lock().await = Some("test".into());
+            let updates = Mutex::new(Vec::new());
+            let bytes = transport
+                .file_download_with_progress("test-hash", &|received, total| {
+                    updates.lock().unwrap().push((received, total));
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            assert_eq!(bytes, b"abcdef");
+            let updates = updates.into_inner().unwrap();
+            assert_eq!(updates[0], (0, known_length.then_some(6)));
+            assert_eq!(updates.last(), Some(&(6, Some(6))));
+            stop.send(()).unwrap();
+            server.await.unwrap().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn progress_tracks_each_chunk_with_known_or_unknown_length() {
+        for total in [Some(6), None] {
+            let (mut sender, body) = hyper::Body::channel();
+            let send = tokio::spawn(async move {
+                for chunk in ["ab", "cde", "f"] {
+                    sender.send_data(chunk.into()).await.unwrap();
+                }
+            });
+            let updates = Mutex::new(Vec::new());
+            let bytes = read_file_body(body, total, &|received, total| {
+                updates.lock().unwrap().push((received, total));
+                Ok(())
+            })
+            .await
+            .unwrap();
+            send.await.unwrap();
+            assert_eq!(bytes, b"abcdef");
+            let mut expected = vec![(0, total), (2, total), (5, total), (6, total)];
+            if total.is_none() {
+                expected.push((6, Some(6)));
+            }
+            assert_eq!(*updates.lock().unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn broken_body_does_not_report_completion() {
+        let (sender, body) = hyper::Body::channel();
+        sender.abort();
+        let updates = Mutex::new(Vec::new());
+        let result = read_file_body(body, Some(6), &|received, total| {
+            updates.lock().unwrap().push((received, total));
+            Ok(())
+        })
+        .await;
+        assert!(matches!(result, Err(SdkError::TransportError(_))));
+        assert_eq!(*updates.lock().unwrap(), vec![(0, Some(6))]);
+    }
+
+    #[tokio::test]
+    async fn listener_failure_aborts_download() {
+        let result = read_file_body(hyper::Body::from("abcdef"), Some(6), &|received, _| {
+            if received > 0 {
+                Err(SdkError::ValidationError("listener failed".into()))
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(SdkError::ValidationError(_))));
     }
 }
 

@@ -15,6 +15,8 @@ pub enum EncryptionError {
     UnsupportedVersion(u8),
     /// No key available for the given key ID (serialized bytes).
     MissingKey(Vec<u8>),
+    /// A progress observer failed, aborting decryption.
+    Progress(String),
 }
 
 impl fmt::Display for EncryptionError {
@@ -30,6 +32,9 @@ impl fmt::Display for EncryptionError {
                 write!(f, "Unsupported ciphertext version: {v}")
             }
             EncryptionError::MissingKey(id) => write!(f, "No key available for key ID {id:?}"),
+            EncryptionError::Progress(message) => {
+                write!(f, "Decryption progress failed: {message}")
+            }
         }
     }
 }

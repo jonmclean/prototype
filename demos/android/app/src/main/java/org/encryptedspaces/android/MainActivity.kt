@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.Build
+import android.os.SystemClock
 import android.provider.Settings
 import android.graphics.BitmapFactory
 import android.graphics.Typeface
@@ -35,6 +36,20 @@ class MainActivity : Activity() {
     private lateinit var connectionPanel: LinearLayout
     private lateinit var emptyState: TextView
     private lateinit var progress: ProgressBar
+    private lateinit var downloadStatus: TextView
+    private val readStages = linkedMapOf(
+        "preparing" to R.string.stage_preparing,
+        "downloading" to R.string.stage_downloading,
+        "verifying" to R.string.stage_verifying,
+        "retrieving_key" to R.string.stage_retrieving_key,
+        "decrypting" to R.string.stage_decrypting,
+        "preview" to R.string.stage_preview
+    )
+    private data class StageState(
+        val processed: Long, val total: Long, val complete: Boolean, val failed: Boolean = false
+    )
+    private val readStageStates = mutableMapOf<String, StageState>()
+    private var currentReadStage: String? = null
     private lateinit var list: ListView
     private lateinit var reconnect: Button
     private lateinit var refresh: Button
@@ -165,6 +180,13 @@ class MainActivity : Activity() {
             visibility = View.INVISIBLE
         }
         root.addView(progress, LinearLayout.LayoutParams(-1, dp(4)))
+        downloadStatus = TextView(this).apply {
+            visibility = View.GONE
+            textSize = 12f
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+        }
+        root.addView(downloadStatus)
         status = TextView(this).also {
             it.setText(R.string.disconnected)
             it.textSize = 12f
@@ -385,9 +407,30 @@ class MainActivity : Activity() {
     }
 
     private fun readFile(entry: JSONObject) {
-        val result = native(JSONObject()
+        var lastPercent: Int? = null
+        var lastStage: String? = null
+        var lastUpdate = 0L
+        val listener = NativeBridge.DownloadProgress { stage, processed, total, complete ->
+            val percent = downloadPercent(processed, total)
+            val now = SystemClock.elapsedRealtime()
+            if (stage != lastStage || complete || percent != lastPercent ||
+                processed == 0L || now - lastUpdate >= 100) {
+                lastPercent = percent
+                lastStage = stage
+                lastUpdate = now
+                runOnUiThread {
+                    if (busy && !isFinishing && !isDestroyed) {
+                        updateReadProgress(stage, processed, total, complete)
+                    }
+                }
+            }
+        }
+        val result = CloudSession.request(this, JSONObject()
             .put("command", "read")
-            .put("id", entry.getLong("id"))) as JSONObject
+            .put("id", entry.getLong("id")), listener) as JSONObject
+        runOnUiThread {
+            if (!isFinishing && !isDestroyed) updateReadProgress("preview", 0, -1, false)
+        }
         val bytes = Base64.decode(result.getString("base64"), Base64.DEFAULT)
         runOnUiThread {
             if (isFinishing || isDestroyed) {
@@ -396,11 +439,52 @@ class MainActivity : Activity() {
             }
             try {
                 preview(entry, bytes)
+                updateReadProgress("preview", 0, -1, true)
                 status.setText(R.string.preview)
             } catch (error: Exception) {
                 bytes.fill(0)
                 showError(error)
             }
+        }
+    }
+
+    private fun downloadPercent(received: Long, total: Long): Int? =
+        if (total > 0) (received.toDouble() / total * 100).toInt().coerceIn(0, 100) else null
+
+    private fun updateReadProgress(stage: String, processed: Long, total: Long, complete: Boolean) {
+        require(stage in readStages) { "Unknown file read stage: $stage" }
+        if (stage == "preparing" && !complete) readStageStates.clear()
+        currentReadStage = stage
+        readStageStates[stage] = StageState(processed, total, complete)
+        val percent = downloadPercent(processed, total)
+        downloadStatus.visibility = View.VISIBLE
+        progress.isIndeterminate = percent == null && !complete
+        if (percent != null || complete) {
+            progress.max = 100
+            progress.progress = if (complete) 100 else checkNotNull(percent)
+        }
+        renderReadStages()
+    }
+
+    private fun renderReadStages() {
+        downloadStatus.text = readStages.entries.joinToString("\n") { (stage, title) ->
+            val state = readStageStates[stage]
+            val percent = state?.let { downloadPercent(it.processed, it.total) }
+            val detail = when {
+                state == null -> getString(R.string.stage_pending)
+                state.failed -> getString(R.string.stage_failed)
+                state.complete -> getString(if (stage in setOf("downloading", "verifying", "decrypting"))
+                    R.string.stage_complete_percent else R.string.stage_complete)
+                percent != null -> getString(R.string.stage_percent_bytes, percent,
+                    Formatter.formatShortFileSize(this, state.processed),
+                    Formatter.formatShortFileSize(this, state.total))
+                stage == "downloading" && state.processed > 0 ->
+                    getString(R.string.download_received,
+                        Formatter.formatShortFileSize(this, state.processed))
+                else -> getString(R.string.working)
+            }
+            getString(R.string.stage_row, if (state?.complete == true) "[x]" else "[ ]",
+                getString(title), detail)
         }
     }
 
@@ -592,6 +676,10 @@ class MainActivity : Activity() {
 
     private fun operation(action: () -> Unit) {
         if (busy) return
+        currentReadStage = null
+        readStageStates.clear()
+        downloadStatus.visibility = View.GONE
+        downloadStatus.text = ""
         busy = true
         status.setText(R.string.working)
         updateControls()
@@ -610,6 +698,12 @@ class MainActivity : Activity() {
     }
 
     private fun showError(error: Exception) {
+        currentReadStage?.let { stage ->
+            readStageStates[stage]?.takeUnless { it.complete }?.let {
+                readStageStates[stage] = it.copy(failed = true)
+                renderReadStages()
+            }
+        }
         logException("SpacesAndroid", "Android operation failed:", error)
         status.text = getString(R.string.error, error.message ?: error.javaClass.simpleName)
     }
@@ -653,6 +747,14 @@ class MainActivity : Activity() {
 
     private fun updateControls() {
         val available = !busy && pendingNetworkAction == null && userNameDialog == null
+        if (!busy) {
+            progress.isIndeterminate = true
+            progress.progress = 0
+            if (readStageStates.isEmpty()) {
+                downloadStatus.visibility = View.GONE
+                downloadStatus.text = ""
+            }
+        }
         progress.visibility = if (busy) View.VISIBLE else View.INVISIBLE
         controls.forEach { it.isEnabled = available }
         for (index in 0 until breadcrumb.childCount) {

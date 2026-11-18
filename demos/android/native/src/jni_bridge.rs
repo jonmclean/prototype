@@ -1,8 +1,9 @@
 use crate::{diagnostics, Client, Connection};
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
+use encrypted_spaces_sdk::file::{FileProgress, FileProgressCallback, FileStage};
 use jni::{
-    objects::{JClass, JString},
+    objects::{JClass, JObject, JString, JValue},
     sys::jstring,
     JNIEnv,
 };
@@ -63,7 +64,7 @@ static RUNTIME: OnceLock<std::result::Result<tokio::runtime::Runtime, std::io::E
     OnceLock::new();
 static CLIENT: Mutex<Option<Client>> = Mutex::new(None);
 
-fn execute(request: Request) -> Result<Value> {
+fn execute(request: Request, progress: &FileProgressCallback<'_>) -> Result<Value> {
     let runtime = RUNTIME
         .get_or_init(tokio::runtime::Runtime::new)
         .as_ref()
@@ -120,7 +121,8 @@ fn execute(request: Request) -> Result<Value> {
                             Ok(serde_json::to_value(client.list(parent_id).await?)?)
                         }
                         Request::Read { id } => {
-                            let (inode, bytes) = client.read_version(id).await?;
+                            let (inode, bytes) =
+                                client.read_version_with_progress(id, progress).await?;
                             Ok(json!({"base64": STANDARD.encode(bytes), "inode": inode}))
                         }
                         Request::Stat { id } => Ok(serde_json::to_value(client.stat(id).await?)?),
@@ -169,14 +171,78 @@ fn execute(request: Request) -> Result<Value> {
 
 #[no_mangle]
 pub extern "system" fn Java_org_encryptedspaces_android_NativeBridge_request(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     request: JString,
 ) -> jstring {
+    handle_request(env, request, None)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_encryptedspaces_android_NativeBridge_requestWithProgress(
+    env: JNIEnv,
+    _class: JClass,
+    request: JString,
+    listener: JObject,
+) -> jstring {
+    handle_request(env, request, Some(listener))
+}
+
+fn handle_request(mut env: JNIEnv, request: JString, listener: Option<JObject>) -> jstring {
     diagnostics::initialize();
     let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Value> {
         let request: String = env.get_string(&request)?.into();
-        execute(serde_json::from_str(&request)?)
+        let vm = env.get_java_vm()?;
+        let listener = listener
+            .map(|value| env.new_global_ref(value))
+            .transpose()?;
+        let progress = |event: FileProgress| {
+            let Some(listener) = &listener else {
+                return Ok(());
+            };
+            let notify = || -> Result<()> {
+                let mut env = vm.attach_current_thread()?;
+                let stage = env.new_string(match event.stage {
+                    FileStage::Preparing => "preparing",
+                    FileStage::Downloading => "downloading",
+                    FileStage::Verifying => "verifying",
+                    FileStage::RetrievingKey => "retrieving_key",
+                    FileStage::Decrypting => "decrypting",
+                })?;
+                let result = env.call_method(
+                    listener.as_obj(),
+                    "onProgress",
+                    "(Ljava/lang/String;JJZ)V",
+                    &[
+                        JValue::Object(stage.as_ref()),
+                        JValue::Long(event.processed.try_into()?),
+                        JValue::Long(event.total.map(i64::try_from).transpose()?.unwrap_or(-1)),
+                        JValue::Bool(event.complete.into()),
+                    ],
+                );
+                if matches!(result, Err(jni::errors::Error::JavaException)) {
+                    env.exception_describe()?;
+                    env.exception_clear()?;
+                }
+                result.context("Download progress listener failed")?;
+                Ok(())
+            };
+            notify().map_err(|error| {
+                encrypted_spaces_sdk::SdkErrorType::ValidationError(format!(
+                    "Cannot report download progress: {error:#}"
+                ))
+            })
+        };
+        let request = serde_json::from_str(&request)?;
+        if matches!(request, Request::Read { .. }) {
+            progress(FileProgress {
+                stage: FileStage::Preparing,
+                processed: 0,
+                total: None,
+                complete: false,
+            })?;
+        }
+        execute(request, &progress)
     }));
     let envelope = match response {
         Ok(Ok(data)) => json!({"ok": true, "data": data}),

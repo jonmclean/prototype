@@ -106,6 +106,15 @@ Rust output is isolated in the repository's `target/android`.
    seek bar; codec support depends on the device. Playback pauses when the app
    goes into the background. Other file types show a byte-count message.
    Links are not interactive and remote images are not fetched.
+   A stage checklist shows preparing the file, downloading, verifying, retrieving
+   the key, decrypting, and opening the preview. Downloading, verification, and
+   decryption each show their own byte-based percentage. If the download size is
+   unknown, a spinner shows bytes received instead of an estimated percentage.
+   Preparation, key retrieval, and opening the preview use a spinner. Stages are
+   checked off only after they succeed; the completed checklist remains visible
+   until the next operation. Failures leave later stages pending, and a retried
+   read starts a new checklist. Ciphertext is fully verified before decryption,
+   and no plaintext is exposed to the preview until decryption succeeds.
 1. **Reconnect** restores the privately saved connection after restarting the app.
    It also prompts for a name, allowing the existing member's display name to change.
    **Forget space** removes that connection state.

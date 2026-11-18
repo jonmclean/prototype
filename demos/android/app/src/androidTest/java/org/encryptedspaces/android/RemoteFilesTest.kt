@@ -128,8 +128,24 @@ class RemoteFilesTest {
             val folder = root.getJSONObject(0).getLong("id")
             val nested = request(JSONObject().put("command", "list").put("parent_id", folder)) as JSONArray
             assertEquals(1, nested.length())
-            val read = request(JSONObject().put("command", "read")
-                .put("id", nested.getJSONObject(0).getLong("id"))) as JSONObject
+            val updates = mutableListOf<Pair<Long, Long>>()
+            val completedStages = mutableListOf<String>()
+            val readResponse = JSONObject(NativeBridge.requestWithProgress(
+                JSONObject().put("command", "read")
+                    .put("id", nested.getJSONObject(0).getLong("id")).toString()
+            ) { stage, processed, total, complete ->
+                if (stage == "downloading" && !complete) updates.add(processed to total)
+                if (complete) completedStages.add(stage)
+            })
+            assertTrue(readResponse.optString("error"), readResponse.getBoolean("ok"))
+            val read = readResponse.getJSONObject("data")
+            assertEquals(0L to -1L, updates.first())
+            assertEquals(listOf("preparing", "downloading", "verifying", "retrieving_key", "decrypting"),
+                completedStages)
+            val (received, total) = updates.last()
+            assertTrue(received > 0)
+            assertEquals(received, total)
+            assertTrue(updates.zipWithNext().all { (first, next) -> first.first <= next.first })
             val bytes = Base64.decode(read.getString("base64"), Base64.DEFAULT)
             assertEquals("Android in-memory read: hello encrypted spaces!\n", bytes.toString(Charsets.UTF_8))
             bytes.fill(0)

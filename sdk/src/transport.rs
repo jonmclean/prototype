@@ -28,6 +28,11 @@ pub type EphemeralReceiver = tokio::sync::broadcast::Receiver<EphemeralEvent>;
 pub type BroadcastReceiver =
     tokio::sync::broadcast::Receiver<crate::websocket_transport::BroadcastEvent>;
 
+/// Receives downloaded ciphertext bytes and the total size, when known.
+/// Returning an error aborts the download. Completion describes the transfer
+/// only; content verification and decryption happen afterwards.
+pub type DownloadProgress<'a> = dyn Fn(u64, Option<u64>) -> Result<()> + Send + Sync + 'a;
+
 /// Transport trait for client-server communication
 ///
 /// This trait defines the interface for sending database operations from the SDK client
@@ -183,6 +188,19 @@ pub trait Transport: Send + Sync + 'static {
 
     /// Download encrypted file data by content hash.
     async fn file_download(&self, hash: &str) -> Result<Vec<u8>>;
+
+    /// Download ciphertext with byte progress. Streaming transports should
+    /// override this; the default reports only the start and completed buffer.
+    async fn file_download_with_progress(
+        &self,
+        hash: &str,
+        progress: &DownloadProgress<'_>,
+    ) -> Result<Vec<u8>> {
+        progress(0, None)?;
+        let bytes = self.file_download(hash).await?;
+        progress(bytes.len() as u64, Some(bytes.len() as u64))?;
+        Ok(bytes)
+    }
 }
 
 #[cfg(test)]

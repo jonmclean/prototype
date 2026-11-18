@@ -26,6 +26,27 @@ class BridgeTest {
         assertTrue(response.getString("error").isNotBlank())
     }
 
+    @Test fun downloadProgressCrossesJniWithoutClaimingFailedReadsCompleted() {
+        NativeBridge.request("""{"command":"disconnect"}""")
+        val updates = mutableListOf<String>()
+        val response = JSONObject(NativeBridge.requestWithProgress(
+            """{"command":"read","id":1}"""
+        ) { stage, processed, total, complete -> updates.add("$stage:$processed:$total:$complete") })
+        assertFalse(response.getBoolean("ok"))
+        assertEquals(listOf("preparing:0:-1:false"), updates)
+        assertTrue(response.getString("error").contains("Connect to a space first"))
+    }
+
+    @Test fun failingDownloadListenerReturnsAnErrorWithoutLeavingAJniExceptionPending() {
+        val response = JSONObject(NativeBridge.requestWithProgress(
+            """{"command":"read","id":1}"""
+        ) { _, _, _, _ -> error("Test listener failure") })
+        assertFalse(response.getBoolean("ok"))
+        assertFalse(response.optBoolean("transport_failure"))
+        assertTrue(response.getString("error").contains("Cannot report download progress"))
+        assertTrue(JSONObject(NativeBridge.request("""{"command":"disconnect"}""")).getBoolean("ok"))
+    }
+
     @Test fun userNameCannotBeSetWithoutAConnectedMember() {
         NativeBridge.request("""{"command":"disconnect"}""")
         val response = JSONObject(NativeBridge.request(
